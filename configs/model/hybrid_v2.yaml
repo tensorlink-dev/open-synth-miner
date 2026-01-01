@@ -14,5 +14,3 @@ model:
   head:
     _target_: src.models.heads.GBMHead
     latent_size: 32
-    sigma_min: 0.01
-    sigma_max: 0.5
