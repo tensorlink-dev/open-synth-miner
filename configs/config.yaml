@@ -1,0 +1,20 @@
+defaults:
+  - model: hybrid_v2
+  - data: default_loader
+
+mode: train
+project: synth-miner
+
+training:
+  batch_size: 4
+  seq_len: 32
+  feature_dim: 4
+  horizon: 12
+  n_paths: 1000
+  lr: 0.001
+
+backtest:
+  champion_repo_id: username/SN50-Hybrid-Hub
+  time_increment: 60
+  horizon: 12
+  n_paths: 1000
