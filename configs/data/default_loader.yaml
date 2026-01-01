@@ -1,0 +1,7 @@
+data:
+  _target_: src.data.loader.MarketDataLoader
+  symbols: ["SYNTH"]
+  timeframe: "1min"
+  window_size: 256
+  feature_cols: []
+  data_path: null
