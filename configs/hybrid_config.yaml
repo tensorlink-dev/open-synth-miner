@@ -1,0 +1,34 @@
+project: synth-miner
+
+model:
+  _target_: src.models.factory.SynthModel
+  backbone:
+    _target_: src.models.factory.HybridBackbone
+    input_size: 4
+    d_model: 32
+    blocks:
+      - _target_: src.models.registry.TransformerBlock
+        d_model: 32
+        nhead: 4
+      - _target_: src.models.factory.ParallelFusion
+        merge_strategy: gating
+        paths:
+          - _target_: src.models.registry.TransformerBlock
+            d_model: 32
+            nhead: 2
+          - _target_: src.models.registry.SDEEvolutionBlock
+            d_model: 32
+            hidden: 48
+  head:
+    _target_: src.models.heads.GBMHead
+    latent_size: 32
+
+training:
+  batch_size: 2
+  seq_len: 20
+  feature_dim: 4
+  initial_price: 100.0
+  target_std: 1.0
+  horizon: 12
+  n_paths: 1000
+  lr: 0.001
