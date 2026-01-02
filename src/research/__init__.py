@@ -1,11 +1,13 @@
-"""Research utilities for Synth miner experiments and backtests."""
+"""Research helpers for training and backtesting synthetic path models."""
 
-from .metrics import crps_ensemble, crps_multi_interval
-from .backtest_runner import BacktestRunner, CRPSMultiIntervalScorer
+from src.research.backtest_runner import BacktestRunner
+from src.research.experiment_mgr import load_config, run_experiment
+from src.research.metrics import CRPSMultiIntervalScorer, SCORING_INTERVALS
 
 __all__ = [
-    "crps_ensemble",
-    "crps_multi_interval",
     "BacktestRunner",
+    "run_experiment",
+    "load_config",
     "CRPSMultiIntervalScorer",
+    "SCORING_INTERVALS",
 ]
