@@ -19,6 +19,23 @@ class Registry:
         self.blocks: Dict[str, Type[nn.Module]] = {}
         self.hybrids: Dict[str, Callable[..., nn.Module]] = {}
 
+    def __getattr__(self, name: str) -> Callable[..., nn.Module]:
+        """Provide attribute-style access to registered entries.
+
+        This makes registry instances compatible with Hydra dotted-path lookups
+        such as ``src.models.registry.registry.TransformerBlock`` when configs
+        reference the registry object directly.
+        """
+
+        lower = name.lower()
+        if lower in self.components:
+            return self.get_component(name)
+        if lower in self.blocks:
+            return self.get_block(name)
+        if lower in self.hybrids:
+            return self.get_hybrid(name)
+        raise AttributeError(f"'Registry' object has no attribute '{name}'")
+
     def _ensure_unique(self, store: Dict[str, Any], key: str) -> None:
         if key in store:
             raise ValueError(f"Duplicate registration detected for '{key}'")
