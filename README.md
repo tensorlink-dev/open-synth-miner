@@ -78,6 +78,41 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
    - Add new blocks/components under `src/models/components/`; the auto-discovery step will register them.
    - Update `configs/model/*.yaml` to declare new hybrid recipes (including parallel fusion or partial blocks) without touching code.
 
+4. **Programmatic usage (import as a package)**
+   ```python
+   from omegaconf import OmegaConf
+   from open_synth_miner import create_model, MarketDataLoader
+
+   cfg = OmegaConf.create(
+       {
+           "model": {
+               "backbone": {
+                   "_target_": "src.models.factory.HybridBackbone",
+                   "input_size": 4,
+                   "d_model": 32,
+                   "blocks": [
+                       {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
+                       {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
+                   ],
+               },
+               "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
+           },
+           "training": {"horizon": 12, "n_paths": 128},
+       }
+   )
+
+   # Build the model and prepare a quick window of synthetic prices.
+   model = create_model(cfg)
+   loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
+   window = loader.latest_window()
+   history = window["prices"].unsqueeze(0)  # [batch, seq_len, feature_dim]
+   initial_price = history[:, -1, 0]
+
+   paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
+   print(paths.shape)  # (batch, n_paths, horizon)
+   ```
+   The top-level package now exposes factories, registries, and data utilities so you can prototype without drilling into submodules.
+
 ## Directory Highlights
 - `src/models/registry.py`: Component/block/hybrid registries plus recursive discovery for decorator-based registration.
 - `src/models/factory.py`: Hydra-driven model creation (fresh or HF-loaded) and hybrid backbone wiring from recipes.

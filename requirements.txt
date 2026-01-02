@@ -1,0 +1,16 @@
+# Core frameworks
+hydra-core>=1.3.2
+omegaconf>=2.3.0
+
+# ML stack
+torch>=2.2.0
+numpy>=1.24.0
+pandas>=2.2.0
+properscoring>=0.1
+
+# Experiment tracking and hubs
+wandb>=0.16.0
+huggingface_hub>=0.22.0
+
+# Utilities
+PyYAML>=6.0.0
