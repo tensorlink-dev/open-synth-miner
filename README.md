@@ -87,6 +87,7 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
    cfg = OmegaConf.create(
        {
            "model": {
+               "_target_": "src.models.factory.SynthModel",
                "backbone": {
                    "_target_": "src.models.factory.HybridBackbone",
                    "input_size": 4,

@@ -234,10 +234,25 @@ def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
 
     model_cfg: Dict | DictConfig = cfg.get("model", cfg) if isinstance(cfg, (DictConfig, dict)) else cfg
 
+    # If users omit the top-level _target_, assume SynthModel when backbone/head are present.
+    if isinstance(model_cfg, DictConfig):
+        model_cfg = OmegaConf.to_container(model_cfg, resolve=True)
+    if isinstance(model_cfg, dict) and "_target_" not in model_cfg and (
+        "backbone" in model_cfg or "head" in model_cfg
+    ):
+        model_cfg = {"_target_": "src.models.factory.SynthModel", **model_cfg}
+
     if isinstance(model_cfg, (DictConfig, dict)) and "_target_" in model_cfg:
         return instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
 
-    return build_model(model_cfg)
+    model = build_model(model_cfg)
+    if isinstance(model, (DictConfig, dict)):
+        raise TypeError(
+            "create_model returned a configuration instead of a module. "
+            "Include `_target_: src.models.factory.SynthModel` in your model config "
+            "or pass an already-instantiated SynthModel."
+        )
+    return model
 
 
 def get_model(cfg: DictConfig | Dict) -> nn.Module:
