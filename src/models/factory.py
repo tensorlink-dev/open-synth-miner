@@ -177,7 +177,7 @@ HEAD_REGISTRY = {
 
 
 def _maybe_instantiate(cfg: Any) -> Any:
-    if isinstance(cfg, DictConfig):
+    if isinstance(cfg, DictConfig) and cfg.get("_target_"):
         return instantiate(cfg)
     if isinstance(cfg, dict) and "_target_" in cfg:
         return instantiate(OmegaConf.create(cfg))
