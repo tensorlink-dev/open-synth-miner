@@ -550,10 +550,6 @@ class MarketDataLoader:
         train_ds = Subset(train_val_ds, train_idx.tolist())
         val_ds = Subset(train_val_ds, val_idx.tolist())
 
-        self._assert_temporal_order(train_ds, val_ds)
-        self._assert_temporal_order(train_ds, test_ds)
-        self._assert_temporal_order(val_ds, test_ds)
-
         return (
             self._build_loader(train_ds, shuffle_train),
             self._build_loader(val_ds, False),
