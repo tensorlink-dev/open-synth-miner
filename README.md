@@ -80,28 +80,28 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
    - Update `configs/model/*.yaml` to declare new hybrid recipes (including parallel fusion or partial blocks) without touching code.
 
 4. **Programmatic usage (import as a package)**
-```python
-from omegaconf import OmegaConf
-from open_synth_miner import create_model, MarketDataLoader
+   ```python
+   from omegaconf import OmegaConf
+   from open_synth_miner import create_model, MarketDataLoader
 
-cfg = OmegaConf.create(
-    {
-        "model": {
-            "backbone": {
-                "_target_": "src.models.factory.HybridBackbone",
-                "input_size": 4,
-                "d_model": 32,
-                "validate_shapes": True,  # probe each block with a dummy tensor
-                "blocks": [
-                    {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
-                    {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
-                ],
-            },
-            "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
-        },
-        "training": {"horizon": 12, "n_paths": 128},
-    }
-)
+   cfg = OmegaConf.create(
+       {
+           "model": {
+               "backbone": {
+                   "_target_": "src.models.factory.HybridBackbone",
+                   "input_size": 4,
+                   "d_model": 32,
+                   "validate_shapes": True,  # probe each block with a dummy tensor
+                   "blocks": [
+                       {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
+                       {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
+                   ],
+               },
+               "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
+           },
+           "training": {"horizon": 12, "n_paths": 128},
+       }
+   )
 
 # Build the model and prepare a quick window of synthetic prices.
 model = create_model(cfg)
