@@ -399,11 +399,14 @@ class MarketDataLoader:
     input_len: int
     pred_len: int
     batch_size: int = 64
+    sort_on_load: bool = True
+    gap_handling: str = "error"
 
     def __post_init__(self) -> None:
         self.assets_data = self.data_source.load_data(self.assets)
         if not self.assets_data:
             raise ValueError("Data source returned no assets")
+        self._normalize_assets()
         stride = self.input_len + self.pred_len
         self.dataset = MarketDataset(
             self.assets_data,
@@ -416,6 +419,62 @@ class MarketDataLoader:
     # ----------------------------
     # Utility helpers
     # ----------------------------
+    def _normalize_assets(self) -> None:
+        """Sort assets by timestamp and optionally fill or reject gaps."""
+
+        valid_gap_modes = {"error", "ffill", "nan"}
+        if self.gap_handling not in valid_gap_modes:
+            raise ValueError(f"gap_handling must be one of {sorted(valid_gap_modes)}")
+
+        for idx, asset in enumerate(self.assets_data):
+            timestamps = pd.to_datetime(asset.timestamps, utc=True)
+            prices = np.asarray(asset.prices)
+
+            order = np.argsort(timestamps) if self.sort_on_load else np.arange(len(timestamps))
+            timestamps = timestamps[order]
+            prices = prices[order]
+            covariates = asset.covariates[order] if asset.covariates is not None else None
+
+            ts_index = pd.DatetimeIndex(timestamps)
+            diffs = ts_index.to_series().diff().dropna()
+            inferred_freq = None if diffs.empty else diffs.mode().iloc[0]
+
+            if inferred_freq is not None:
+                full_range = pd.date_range(ts_index.min(), ts_index.max(), freq=inferred_freq, tz=ts_index.tz)
+                missing = full_range.difference(ts_index)
+            else:
+                full_range = ts_index
+                missing = pd.DatetimeIndex([])
+
+            if missing.size and self.gap_handling == "error":
+                raise ValueError(
+                    f"Temporal gaps detected for asset {asset.name}: {missing.size} missing observations"
+                )
+
+            if missing.size and self.gap_handling in {"ffill", "nan"}:
+                columns: Dict[str, Any] = {"price": prices}
+                if asset.covariates is not None:
+                    covariate_cols = asset.covariate_columns or [f"cov_{i}" for i in range(covariates.shape[1])]
+                    for col_idx, col_name in enumerate(covariate_cols):
+                        columns[col_name] = covariates[:, col_idx]
+                frame = pd.DataFrame(columns, index=ts_index)
+                frame = frame.reindex(full_range)
+                if self.gap_handling == "ffill":
+                    frame = frame.ffill()
+
+                prices = frame["price"].to_numpy()
+                if asset.covariates is not None:
+                    covariates = frame[covariate_cols].to_numpy()
+                ts_index = frame.index
+
+            self.assets_data[idx] = AssetData(
+                name=asset.name,
+                timestamps=ts_index.to_numpy(),
+                prices=prices,
+                covariate_columns=asset.covariate_columns,
+                covariates=covariates,
+            )
+
     def _resolve_indices(self, ds: Dataset) -> Tuple[MarketDataset, np.ndarray]:
         if isinstance(ds, Subset):
             base_ds, parent_indices = self._resolve_indices(ds.dataset)
