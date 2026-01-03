@@ -52,6 +52,7 @@ model:
       - _target_: src.models.registry.LSTMBlock
         d_model: 32
         num_layers: 1
+    validate_shapes: true  # default; ensures each block preserves (batch, seq, d_model)
   head:
     _target_: src.models.heads.GBMHead
     latent_size: 32
@@ -90,28 +91,31 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
                    "_target_": "src.models.factory.HybridBackbone",
                    "input_size": 4,
                    "d_model": 32,
-                   "blocks": [
-                       {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
-                       {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
-                   ],
-               },
+                    "validate_shapes": True,  # probe each block with a dummy tensor
+                    "blocks": [
+                        {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
+                        {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
+                    ],
+                },
                "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
-           },
-           "training": {"horizon": 12, "n_paths": 128},
-       }
-   )
+        },
+        "training": {"horizon": 12, "n_paths": 128},
+    }
+)
 
-   # Build the model and prepare a quick window of synthetic prices.
-   model = create_model(cfg)
-   loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
-   window = loader.latest_window()
-   history = window["prices"].unsqueeze(0)  # [batch, seq_len, feature_dim]
-   initial_price = history[:, -1, 0]
+# Build the model and prepare a quick window of synthetic prices.
+model = create_model(cfg)
+loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
+window = loader.latest_window()
+history = window["prices"].unsqueeze(0)  # [batch, seq_len, feature_dim]
+initial_price = history[:, -1, 0]
 
-   paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
-   print(paths.shape)  # (batch, n_paths, horizon)
-   ```
-   The top-level package now exposes factories, registries, and data utilities so you can prototype without drilling into submodules.
+paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
+print(paths.shape)  # (batch, n_paths, horizon)
+```
+The top-level package now exposes factories, registries, and data utilities so you can prototype without drilling into submodules.
+
+Shape validation runs during `HybridBackbone` construction to catch blocks that inadvertently change sequence length or feature size. If you intentionally use a block with dynamic output shapes (e.g., pooling), set `validate_shapes: false` in the backbone config to bypass the dummy-tensor probe.
 
 ## Directory Highlights
 - `src/models/registry.py`: Component/block/hybrid registries plus recursive discovery for decorator-based registration.
