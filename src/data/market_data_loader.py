@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass
-from typing import Any, Dict, Generator, List, Optional, Tuple
+from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -155,6 +155,8 @@ class AssetData:
     name: str
     timestamps: np.ndarray
     prices: np.ndarray
+    covariate_columns: Optional[List[str]] = None
+    covariates: Optional[np.ndarray] = None
 
 
 class DataSource(abc.ABC):
@@ -177,7 +179,9 @@ class HFParquetSource(DataSource):
         repo_type: Optional[str] = "dataset",
         asset_column: str = "asset",
         price_column: str = "price",
+        fallback_price_column: Optional[str] = "close",
         timestamp_column: str = "timestamp",
+        covariate_columns: Optional[List[str]] = None,
     ) -> None:
         self.repo_id = repo_id
         self.filename = filename
@@ -185,7 +189,9 @@ class HFParquetSource(DataSource):
         self.repo_type = repo_type
         self.asset_column = asset_column
         self.price_column = price_column
+        self.fallback_price_column = fallback_price_column
         self.timestamp_column = timestamp_column
+        self.covariate_columns = covariate_columns
 
     def load_data(self, assets: List[str]) -> List[AssetData]:
         file_path = hf_hub_download(
@@ -199,10 +205,21 @@ class HFParquetSource(DataSource):
 
         if self.timestamp_column not in frame.columns:
             raise ValueError("Parquet source must include a timestamp column")
-        if self.price_column not in frame.columns:
-            raise ValueError("Parquet source must include a price column")
+
+        if self.price_column in frame.columns:
+            price_series = frame[self.price_column]
+        elif self.fallback_price_column and self.fallback_price_column in frame.columns:
+            price_series = frame[self.fallback_price_column]
+        else:
+            raise ValueError("Parquet source must include a price or close column")
 
         frame[self.timestamp_column] = pd.to_datetime(frame[self.timestamp_column], utc=True)
+        frame["_price"] = price_series
+
+        covariate_columns = self.covariate_columns or []
+        missing_covariates = [col for col in covariate_columns if col not in frame.columns]
+        if missing_covariates:
+            raise ValueError(f"Missing covariate columns: {missing_covariates}")
 
         results: List[AssetData] = []
         if self.asset_column in frame.columns:
@@ -215,7 +232,9 @@ class HFParquetSource(DataSource):
                     AssetData(
                         name=asset,
                         timestamps=subset[self.timestamp_column].to_numpy(),
-                        prices=subset[self.price_column].to_numpy(),
+                        prices=subset["_price"].to_numpy(),
+                        covariate_columns=covariate_columns or None,
+                        covariates=subset[covariate_columns].to_numpy() if covariate_columns else None,
                     )
                 )
         else:
@@ -227,7 +246,9 @@ class HFParquetSource(DataSource):
                 AssetData(
                     name=asset,
                     timestamps=subset[self.timestamp_column].to_numpy(),
-                    prices=subset[self.price_column].to_numpy(),
+                    prices=subset["_price"].to_numpy(),
+                    covariate_columns=covariate_columns or None,
+                    covariates=subset[covariate_columns].to_numpy() if covariate_columns else None,
                 )
             )
         return results
@@ -428,13 +449,21 @@ class MarketDataLoader:
     # ----------------------------
     def static_holdout(
         self,
-        cutoff: pd.Timestamp,
+        cutoff: Union[pd.Timestamp, float],
         *,
         val_size: float = 0.2,
         shuffle_train: bool = True,
     ) -> Tuple[DataLoader, DataLoader, DataLoader]:
         starts = self.dataset.get_start_timestamps()
         horizons = self.dataset.get_horizon_timestamps()
+
+        if isinstance(cutoff, float):
+            if not 0.0 < cutoff < 1.0:
+                raise ValueError("Cutoff fraction must be between 0 and 1")
+            cutoff_ts = pd.Series(horizons).quantile(1.0 - cutoff)
+            cutoff = pd.to_datetime(cutoff_ts, utc=True)
+        else:
+            cutoff = pd.to_datetime(cutoff, utc=True)
 
         train_val_mask = horizons < cutoff
         test_mask = starts >= cutoff
