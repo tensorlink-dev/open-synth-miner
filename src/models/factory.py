@@ -48,6 +48,7 @@ class HybridBackbone(BackboneBase):
         super().__init__()
         if not blocks:
             raise ValueError("HybridBackbone requires a non-empty block list")
+        self.input_size = input_size
         self.input_proj = nn.Linear(input_size, d_model)
         self.d_model = d_model
         self.layers = nn.ModuleList([self._materialize_block(block) for block in blocks])
@@ -72,8 +73,9 @@ class HybridBackbone(BackboneBase):
         return fn(**kwargs) if kwargs else fn()
 
     def _infer_output_dim(self) -> int:
-        sample = torch.zeros(1, 2, self.d_model)
-        out = self.forward(sample)
+        sample = torch.zeros(1, 2, self.input_size)
+        with torch.no_grad():
+            out = self.forward(sample)
         return out.shape[-1]
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
