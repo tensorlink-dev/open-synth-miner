@@ -1,14 +1,133 @@
-"""Training utilities for Synth miner research runs."""
+"""Training utilities and adapters for SynthModel research runs."""
 from __future__ import annotations
-
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 import torch.optim as optim
+from torch.utils.data import DataLoader
 
 from src.models.factory import SynthModel
-from .metrics import crps_ensemble, log_likelihood
 from src.tracking.wandb_logger import log_experiment_results
+from .metrics import crps_ensemble, log_likelihood
+
+
+class DataToModelAdapter:
+    """Bridge between leak-safe loader batches and SynthModel inputs."""
+
+    def __init__(self, device: torch.device, *, target_is_log_return: bool = True) -> None:
+        self.device = device
+        self.target_is_log_return = target_is_log_return
+
+    def __call__(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
+        """Move tensors to device, transpose, and build price-factor targets.
+
+        - Inputs from :class:`MarketDataLoader` arrive shaped (B, F, T).
+        - SynthModel expects (B, T, F), so we transpose.
+        - ``target_is_log_return`` toggles whether loader targets are log-returns (default)
+          or pre-computed price levels/factors. Log-returns are converted to cumulative
+          price factors starting at 1.0.
+        - ``initial_price`` is 1.0 so model simulations become relative factors.
+        """
+
+        inputs = batch["inputs"].to(self.device)
+        target = batch["target"].detach().to(self.device)
+
+        history = inputs.transpose(1, 2).contiguous()
+        if self.target_is_log_return:
+            target_factors = torch.exp(torch.cumsum(target, dim=-1))
+        else:
+            target_factors = target
+        initial_price = torch.ones(history.shape[0], device=self.device)
+
+        return {
+            "history": history,
+            "initial_price": initial_price,
+            "target_factors": target_factors,
+        }
+
+
+class Trainer:
+    """Trainer that adapts leak-safe loader batches for SynthModel."""
+
+    def __init__(
+        self,
+        model: SynthModel,
+        optimizer: optim.Optimizer,
+        n_paths: int,
+        *,
+        device: Optional[torch.device] = None,
+        adapter: Optional[DataToModelAdapter] = None,
+    ) -> None:
+        self.model = model
+        self.optimizer = optimizer
+        self.n_paths = n_paths
+        self.device = device or next(model.parameters()).device
+        self.adapter = adapter or DataToModelAdapter(self.device)
+
+    def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
+        """Single training step handling shape and semantic adaptation."""
+
+        self.model.train()
+        self.optimizer.zero_grad()
+
+        adapted = self.adapter(batch)
+        history = adapted["history"]
+        initial_price = adapted["initial_price"]
+        target = adapted["target_factors"]
+        horizon = target.shape[-1]
+
+        paths, mu, sigma = self.model(
+            history,
+            initial_price=initial_price,
+            horizon=horizon,
+            n_paths=self.n_paths,
+        )
+        sim_paths = paths.transpose(1, 2)
+        crps = crps_ensemble(sim_paths, target)
+        loss = crps.mean()
+        loss.backward()
+        self.optimizer.step()
+
+        sharpness = sim_paths.std(dim=-1).mean()
+        loglik = log_likelihood(sim_paths, target).mean()
+        return {
+            "loss": loss.item(),
+            "crps": crps.mean().item(),
+            "sharpness": sharpness.item(),
+            "log_likelihood": loglik.item(),
+            "mu": mu.mean().item(),
+            "sigma": sigma.mean().item(),
+        }
+
+    @torch.no_grad()
+    def validate(self, dataloader: DataLoader) -> Dict[str, float]:
+        """Run CRPS validation over a holdout loader."""
+
+        self.model.eval()
+        total_loss = 0.0
+        total_batches = 0
+
+        for batch in dataloader:
+            adapted = self.adapter(batch)
+            history = adapted["history"]
+            initial_price = adapted["initial_price"]
+            target = adapted["target_factors"]
+            horizon = target.shape[-1]
+
+            paths, _, _ = self.model(
+                history,
+                initial_price=initial_price,
+                horizon=horizon,
+                n_paths=self.n_paths,
+            )
+            sim_paths = paths.transpose(1, 2)
+            crps = crps_ensemble(sim_paths, target)
+
+            total_loss += crps.mean().item()
+            total_batches += 1
+
+        avg_loss = total_loss / max(total_batches, 1)
+        return {"val_crps": avg_loss}
 
 
 def train_step(
