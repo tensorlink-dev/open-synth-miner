@@ -129,6 +129,7 @@ from src.data import HFParquetSource, MarketDataLoader, ZScoreEngineer
 source = HFParquetSource(
     repo_id="tensorlink-dev/open-synth-training-data",
     filename="prices.parquet",  # choose a parquet file from the repo
+    repo_type="dataset",  # ensure the Hub lookup hits the dataset endpoint
     asset_column="asset",
     price_column="price",
     timestamp_column="timestamp",
@@ -136,6 +137,8 @@ source = HFParquetSource(
 loader = MarketDataLoader(source, ZScoreEngineer(), assets=["BTC"], input_len=96, pred_len=24, batch_size=64)
 train_dl, val_dl, test_dl = loader.static_holdout(pd.Timestamp("2023-01-01", tz="UTC"))
 ```
+If you see a `401` while downloading, the repository may be private or gated; authenticate with `huggingface-cli login` or set
+`HF_TOKEN` so the Hub request can resolve the parquet files.
 See `docs/hf_market_data.md` for step-by-step instructions, walk-forward/hybrid examples, and safety notes.
 
 ## Directory Highlights

@@ -27,6 +27,7 @@ from src.data import HFParquetSource, MarketDataLoader, ZScoreEngineer
 source = HFParquetSource(
     repo_id="tensorlink-dev/open-synth-training-data",
     filename="prices.parquet",  # replace with one of the listed Parquet files
+    repo_type="dataset",  # point to the dataset endpoint on the Hub
     asset_column="asset",
     price_column="price",
     timestamp_column="timestamp",
@@ -55,6 +56,7 @@ from src.data import HFParquetSource, MarketDataLoader, WaveletEngineer
 source = HFParquetSource(
     repo_id="tensorlink-dev/open-synth-training-data",
     filename="prices.parquet",
+    repo_type="dataset",
     asset_column="asset",
     price_column="price",
     timestamp_column="timestamp",
@@ -84,3 +86,4 @@ fragments, holdout_loader = loader.hybrid_nested(
 - Ensure the cutoff/periods keep training windows strictly before validation/holdout windows—the loader enforces this with timestamp comparisons.
 - Avoid mixing timezones; timestamps are normalized to UTC in the loader.
 - If you add new Parquet files, preserve the `asset`, `timestamp`, and `price` column names or pass custom names to `HFParquetSource`.
+- A `401` during download usually means the repository is private/gated or the wrong Hub endpoint was used. Set `repo_type="dataset"` (default) and authenticate with `huggingface-cli login` or `HF_TOKEN` if needed.
