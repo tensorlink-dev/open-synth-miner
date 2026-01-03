@@ -1,4 +1,10 @@
-"""Universal model factory with Hydra integration and HF loading."""
+"""Universal model factory with Hydra integration and HF loading.
+
+Backbone registry blocks are expected to accept and return tensors shaped as
+``(batch, sequence_length, d_model)``. Implementations should preserve both the
+sequence length and feature dimension unless explicitly designed for dynamic
+shapes, in which case validation can be opt-out.
+"""
 from __future__ import annotations
 
 import inspect
@@ -44,7 +50,13 @@ class ParallelFusion(nn.Module):
 class HybridBackbone(BackboneBase):
     """Backbone that stitches Hydra-instantiated blocks or callables."""
 
-    def __init__(self, input_size: int, d_model: int, blocks: List[Any]):
+    def __init__(
+        self,
+        input_size: int,
+        d_model: int,
+        blocks: List[Any],
+        validate_shapes: bool = True,
+    ):
         super().__init__()
         if not blocks:
             raise ValueError("HybridBackbone requires a non-empty block list")
@@ -52,6 +64,8 @@ class HybridBackbone(BackboneBase):
         self.input_proj = nn.Linear(input_size, d_model)
         self.d_model = d_model
         self.layers = nn.ModuleList([self._materialize_block(block) for block in blocks])
+        if validate_shapes:
+            self.validate_shapes()
         self.output_dim = self._infer_output_dim()
 
     def _materialize_block(self, block: Any) -> nn.Module:
@@ -77,6 +91,30 @@ class HybridBackbone(BackboneBase):
         with torch.no_grad():
             out = self.forward(sample)
         return out.shape[-1]
+
+    def validate_shapes(self) -> None:
+        """Ensure blocks preserve (batch, seq, d_model) shape contract."""
+
+        batch, seq = 2, 3
+        expected = (batch, seq, self.d_model)
+        with torch.no_grad():
+            h = self.input_proj(torch.zeros(batch, seq, self.input_size))
+            if h.shape != expected:
+                raise ValueError(
+                    "HybridBackbone input projection expected shape "
+                    f"{expected} but received {tuple(h.shape)}"
+                )
+
+            for idx, layer in enumerate(self.layers):
+                h = layer(h)
+                if h.shape != expected:
+                    raise ValueError(
+                        "HybridBackbone block validation failed: "
+                        f"block {idx} ({layer.__class__.__name__}) changed shape "
+                        f"from {expected} to {tuple(h.shape)}. Blocks should "
+                        "preserve (batch, seq, d_model) unless dynamic shapes "
+                        "are explicitly enabled."
+                    )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.input_proj(x)
