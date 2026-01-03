@@ -184,33 +184,44 @@ def _maybe_instantiate(cfg: Any) -> Any:
     return cfg
 
 
+def _to_container(cfg: Any) -> Any:
+    """Convert OmegaConf nodes to plain containers for safe downstream access."""
+
+    return OmegaConf.to_container(cfg, resolve=True) if isinstance(cfg, DictConfig) else cfg
+
+
 def _instantiate_architecture(model_cfg: Dict | DictConfig) -> nn.Module:
     discover_components("src/models/components")
     return _maybe_instantiate(model_cfg)
 
 
 def build_model(model_cfg: Dict | DictConfig) -> SynthModel:
-    model_cfg = _maybe_instantiate(model_cfg) if isinstance(model_cfg, DictConfig) else model_cfg
     if isinstance(model_cfg, SynthModel):
         return model_cfg
 
+    model_cfg = _to_container(model_cfg)
     if isinstance(model_cfg, dict) and "_target_" in model_cfg:
         return instantiate(OmegaConf.create(model_cfg))
 
-    backbone_cfg = model_cfg.get("backbone", {})
-    head_cfg = model_cfg.get("head", {})
-    backbone = _maybe_instantiate(backbone_cfg) if isinstance(backbone_cfg, DictConfig) else backbone_cfg
+    backbone_cfg = _to_container(model_cfg.get("backbone", {}))
+    head_cfg = _to_container(model_cfg.get("head", {}))
+
+    backbone = _maybe_instantiate(backbone_cfg)
     if not isinstance(backbone, BackboneBase):
         backbone = instantiate(OmegaConf.create(backbone_cfg))
+
     latent_size = getattr(backbone, "output_dim", None) or getattr(backbone, "d_model", None)
     if latent_size is None:
         raise ValueError("Backbone must expose output_dim for head construction")
+
     head_cfg_resolved = head_cfg
     if isinstance(head_cfg, dict) and "latent_size" not in head_cfg:
         head_cfg_resolved = {**head_cfg, "latent_size": latent_size}
-    head = _maybe_instantiate(head_cfg_resolved) if isinstance(head_cfg_resolved, DictConfig) else head_cfg_resolved
+
+    head = _maybe_instantiate(head_cfg_resolved)
     if not isinstance(head, HeadBase):
         head = instantiate(OmegaConf.create(head_cfg_resolved))
+
     return SynthModel(backbone=backbone, head=head)
 
 
@@ -223,10 +234,8 @@ def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
 
     model_cfg: Dict | DictConfig = cfg.get("model", cfg) if isinstance(cfg, (DictConfig, dict)) else cfg
 
-    if isinstance(model_cfg, DictConfig) and "_target_" in model_cfg:
-        return instantiate(model_cfg)
-    if isinstance(model_cfg, dict) and "_target_" in model_cfg:
-        return instantiate(OmegaConf.create(model_cfg))
+    if isinstance(model_cfg, (DictConfig, dict)) and "_target_" in model_cfg:
+        return instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
 
     return build_model(model_cfg)
 
