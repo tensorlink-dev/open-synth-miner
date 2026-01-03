@@ -56,8 +56,11 @@ class HybridBackbone(BackboneBase):
         d_model: int,
         blocks: List[Any],
         validate_shapes: bool = True,
+        **_: Any,
     ):
         super().__init__()
+        # Hydra can pass through extra keyword arguments (e.g., from config defaults);
+        # consume them to keep instantiation forward-compatible.
         if not blocks:
             raise ValueError("HybridBackbone requires a non-empty block list")
         self.input_size = input_size
