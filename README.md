@@ -113,6 +113,8 @@ initial_price = history[:, -1, 0]
 paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
 print(paths.shape)  # (batch, n_paths, horizon)
 ```
+Make sure you pass the full configuration (or the `model` node) to `create_model`/`get_model` before calling it—invoking a raw
+`DictConfig` from Hydra as if it were a module will raise `TypeError: 'DictConfig' object is not callable`.
 The top-level package now exposes factories, registries, and data utilities so you can prototype without drilling into submodules.
 
 Shape validation runs during `HybridBackbone` construction to catch blocks that inadvertently change sequence length or feature size. If you intentionally use a block with dynamic output shapes (e.g., pooling), set `validate_shapes: false` in the backbone config to bypass the dummy-tensor probe.

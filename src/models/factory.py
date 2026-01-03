@@ -214,12 +214,21 @@ def build_model(model_cfg: Dict | DictConfig) -> SynthModel:
     return SynthModel(backbone=backbone, head=head)
 
 
-def create_model(cfg: DictConfig | Dict) -> SynthModel:
-    if isinstance(cfg, DictConfig):
-        return instantiate(cfg.model)
-    if isinstance(cfg, dict) and "model" in cfg and "_target_" in cfg["model"]:
-        return instantiate(OmegaConf.create(cfg["model"]))
-    return build_model(cfg.get("model", cfg))
+def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
+    """Instantiate a model from either a full config or a model-only node."""
+
+    # Accept already-built modules to keep the API idempotent.
+    if isinstance(cfg, SynthModel):
+        return cfg
+
+    model_cfg: Dict | DictConfig = cfg.get("model", cfg) if isinstance(cfg, (DictConfig, dict)) else cfg
+
+    if isinstance(model_cfg, DictConfig) and "_target_" in model_cfg:
+        return instantiate(model_cfg)
+    if isinstance(model_cfg, dict) and "_target_" in model_cfg:
+        return instantiate(OmegaConf.create(model_cfg))
+
+    return build_model(model_cfg)
 
 
 def get_model(cfg: DictConfig | Dict) -> nn.Module:
