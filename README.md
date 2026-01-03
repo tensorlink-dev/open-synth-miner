@@ -120,6 +120,24 @@ The top-level package now exposes factories, registries, and data utilities so y
 
 Shape validation runs during `HybridBackbone` construction to catch blocks that inadvertently change sequence length or feature size. If you intentionally use a block with dynamic output shapes (e.g., pooling), set `validate_shapes: false` in the backbone config to bypass the dummy-tensor probe.
 
+## Hugging Face market data (tensorlink-dev/open-synth-training-data)
+Use the leak-safe `MarketDataLoader` with the public Hugging Face Parquet dataset published at [`tensorlink-dev/open-synth-training-data`](https://huggingface.co/datasets/tensorlink-dev/open-synth-training-data). A minimal example:
+```python
+import pandas as pd
+from src.data import HFParquetSource, MarketDataLoader, ZScoreEngineer
+
+source = HFParquetSource(
+    repo_id="tensorlink-dev/open-synth-training-data",
+    filename="prices.parquet",  # choose a parquet file from the repo
+    asset_column="asset",
+    price_column="price",
+    timestamp_column="timestamp",
+)
+loader = MarketDataLoader(source, ZScoreEngineer(), assets=["BTC"], input_len=96, pred_len=24, batch_size=64)
+train_dl, val_dl, test_dl = loader.static_holdout(pd.Timestamp("2023-01-01", tz="UTC"))
+```
+See `docs/hf_market_data.md` for step-by-step instructions, walk-forward/hybrid examples, and safety notes.
+
 ## Directory Highlights
 - `src/models/registry.py`: Component/block/hybrid registries plus recursive discovery for decorator-based registration.
 - `src/models/factory.py`: Hydra-driven model creation (fresh or HF-loaded) and hybrid backbone wiring from recipes.
