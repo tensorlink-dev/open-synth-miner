@@ -174,6 +174,7 @@ class HFParquetSource(DataSource):
         filename: str,
         *,
         revision: Optional[str] = None,
+        repo_type: Optional[str] = "dataset",
         asset_column: str = "asset",
         price_column: str = "price",
         timestamp_column: str = "timestamp",
@@ -181,12 +182,18 @@ class HFParquetSource(DataSource):
         self.repo_id = repo_id
         self.filename = filename
         self.revision = revision
+        self.repo_type = repo_type
         self.asset_column = asset_column
         self.price_column = price_column
         self.timestamp_column = timestamp_column
 
     def load_data(self, assets: List[str]) -> List[AssetData]:
-        file_path = hf_hub_download(repo_id=self.repo_id, filename=self.filename, revision=self.revision)
+        file_path = hf_hub_download(
+            repo_id=self.repo_id,
+            filename=self.filename,
+            revision=self.revision,
+            repo_type=self.repo_type,
+        )
         table = pq.read_table(file_path)
         frame = table.to_pandas()
 
