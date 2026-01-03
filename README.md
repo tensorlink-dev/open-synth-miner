@@ -91,17 +91,17 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
                    "_target_": "src.models.factory.HybridBackbone",
                    "input_size": 4,
                    "d_model": 32,
-                    "validate_shapes": True,  # probe each block with a dummy tensor
-                    "blocks": [
-                        {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
-                        {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
-                    ],
-                },
+                   "validate_shapes": True,  # probe each block with a dummy tensor
+                   "blocks": [
+                       {"_target_": "src.models.registry.TransformerBlock", "d_model": 32, "nhead": 4},
+                       {"_target_": "src.models.registry.LSTMBlock", "d_model": 32},
+                   ],
+               },
                "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
-        },
-        "training": {"horizon": 12, "n_paths": 128},
-    }
-)
+           },
+           "training": {"horizon": 12, "n_paths": 128},
+       }
+   )
 
 # Build the model and prepare a quick window of synthetic prices.
 model = create_model(cfg)
