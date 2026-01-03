@@ -103,7 +103,7 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
        }
    )
 
-# Build the model and prepare a quick window of synthetic prices.
+
 model = create_model(cfg)
 loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
 window = loader.latest_window()
