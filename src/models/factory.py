@@ -56,6 +56,7 @@ class HybridBackbone(BackboneBase):
         d_model: int,
         blocks: List[Any],
         validate_shapes: bool = True,
+        strict_shapes: bool = True,
         **_: Any,
     ):
         super().__init__()
@@ -68,7 +69,7 @@ class HybridBackbone(BackboneBase):
         self.d_model = d_model
         self.layers = nn.ModuleList([self._materialize_block(block) for block in blocks])
         if validate_shapes:
-            self.validate_shapes()
+            self.validate_shapes(strict_shapes=strict_shapes)
         self.output_dim = self._infer_output_dim()
 
     def _materialize_block(self, block: Any) -> nn.Module:
@@ -95,7 +96,7 @@ class HybridBackbone(BackboneBase):
             out = self.forward(sample)
         return out.shape[-1]
 
-    def validate_shapes(self) -> None:
+    def validate_shapes(self, strict_shapes: bool = True) -> None:
         """Ensure blocks preserve (batch, seq, d_model) shape contract."""
 
         batch, seq = 2, 3
@@ -109,15 +110,21 @@ class HybridBackbone(BackboneBase):
                 )
 
             for idx, layer in enumerate(self.layers):
-                h = layer(h)
-                if h.shape != expected:
-                    raise ValueError(
-                        "HybridBackbone block validation failed: "
+                h_new = layer(h)
+                if h_new.shape != expected:
+                    message = (
+                        "HybridBackbone block validation: "
                         f"block {idx} ({layer.__class__.__name__}) changed shape "
-                        f"from {expected} to {tuple(h.shape)}. Blocks should "
-                        "preserve (batch, seq, d_model) unless dynamic shapes "
-                        "are explicitly enabled."
+                        f"from {expected} to {tuple(h_new.shape)}."
                     )
+                    if strict_shapes:
+                        raise ValueError(
+                            message
+                            + " Blocks should preserve (batch, seq, d_model) unless "
+                            "dynamic shapes are explicitly enabled."
+                        )
+                    print(message)
+                h = h_new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.input_proj(x)
