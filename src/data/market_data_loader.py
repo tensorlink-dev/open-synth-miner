@@ -369,7 +369,7 @@ class MarketDataset(Dataset):
         return {
             "inputs": inputs,
             "target": target,
-            "decision_timestamp": window.decision_ts,
+            "decision_timestamp": window.decision_ts.isoformat(),
             "meta": meta,
         }
 
