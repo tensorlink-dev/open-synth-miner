@@ -127,7 +127,17 @@ class HybridBackbone(BackboneBase):
 
 
 class SynthModel(nn.Module):
-    """Model wrapping a backbone and head for stochastic path generation."""
+    """Model wrapping a backbone and head for stochastic path generation.
+
+    Expected inputs
+    ----------------
+    * ``x``: price/feature history shaped ``(batch, time, features)``. The
+      feature dimension must align with the ``input_size`` configured on the
+      backbone (see ``configs/model``), which should mirror the feature
+      engineering output of the data loader.
+    * ``initial_price``: scalar per batch element representing the current
+      price level that anchors generated paths.
+    """
 
     def __init__(self, backbone: BackboneBase, head: HeadBase):
         super().__init__()

@@ -2,13 +2,14 @@
 from __future__ import annotations
 from typing import Dict, Optional
 
+import numpy as np
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from src.models.factory import SynthModel
 from src.tracking.wandb_logger import log_experiment_results
-from .metrics import crps_ensemble, log_likelihood
+from .metrics import CRPSMultiIntervalScorer, crps_ensemble, log_likelihood
 
 
 class DataToModelAdapter:
@@ -168,6 +169,7 @@ def evaluate_and_log(
     horizon: int,
     n_paths: int,
     step: int,
+    time_increment: int = 60,
 ) -> Dict[str, float]:
     model.eval()
     with torch.no_grad():
@@ -187,6 +189,15 @@ def evaluate_and_log(
             "sharpness": sharpness.item(),
             "log_likelihood": loglik.item(),
         }
-        series = actual_series if actual_series is not None else target.repeat(horizon)
+        series = actual_series if actual_series is not None else target.unsqueeze(-1).repeat(1, horizon)
+
+        if actual_series is not None:
+            scorer = CRPSMultiIntervalScorer(time_increment=time_increment)
+            interval_totals = []
+            for batch_idx in range(paths.shape[0]):
+                total, _ = scorer(paths[batch_idx], actual_series[batch_idx])
+                interval_totals.append(total)
+            metrics["multi_interval_crps"] = float(np.mean(interval_totals))
+
         log_experiment_results(metrics, paths, series, horizon=horizon, step=step)
         return metrics

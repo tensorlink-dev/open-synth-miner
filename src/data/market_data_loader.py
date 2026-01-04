@@ -401,6 +401,7 @@ class MarketDataLoader:
     batch_size: int = 64
     sort_on_load: bool = True
     gap_handling: str = "error"
+    feature_dim: int = 3
 
     def __post_init__(self) -> None:
         self.assets_data = self.data_source.load_data(self.assets)
@@ -415,6 +416,15 @@ class MarketDataLoader:
             pred_len=self.pred_len,
             stride=stride,
         )
+        if len(self.dataset) == 0:
+            raise ValueError("No windows available for the requested input/prediction lengths")
+
+        sample_inputs = self.dataset[0]["inputs"]
+        inferred_dim = int(sample_inputs.shape[0])
+        if inferred_dim != int(self.feature_dim):
+            raise ValueError(
+                f"Feature dimension mismatch: expected {self.feature_dim}, engineer produced {inferred_dim}"
+            )
 
     # ----------------------------
     # Utility helpers
@@ -474,6 +484,37 @@ class MarketDataLoader:
                 covariate_columns=asset.covariate_columns,
                 covariates=covariates,
             )
+
+    def get_price_series(
+        self,
+        *,
+        asset: Optional[str] = None,
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+    ) -> torch.Tensor:
+        """Return a price tensor for a given asset and optional slice.
+
+        This provides a stable surface for backtesting flows that need raw price
+        histories without duplicating loader implementations.
+        """
+
+        if asset is None:
+            asset_idx = 0
+        else:
+            matches = {a.name: idx for idx, a in enumerate(self.assets_data)}
+            if asset not in matches:
+                raise ValueError(f"Unknown asset '{asset}', available assets: {list(matches)}")
+            asset_idx = matches[asset]
+
+        asset_data = self.assets_data[asset_idx]
+        series = asset_data.prices
+        total_len = len(series)
+        start_idx = 0 if start is None else start
+        end_idx = total_len if end is None else end
+        if not (0 <= start_idx <= end_idx <= total_len):
+            raise ValueError(f"Invalid slice [{start_idx}, {end_idx}) for series length {total_len}")
+
+        return torch.tensor(series[start_idx:end_idx], dtype=torch.float32)
 
     def _resolve_indices(self, ds: Dataset) -> Tuple[MarketDataset, np.ndarray]:
         if isinstance(ds, Subset):
