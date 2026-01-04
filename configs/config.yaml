@@ -8,7 +8,7 @@ project: synth-miner
 training:
   batch_size: 4
   seq_len: 32
-  feature_dim: 4
+  feature_dim: ${data.feature_dim}
   horizon: 12
   n_paths: 1000
   lr: 0.001

@@ -16,7 +16,7 @@ from src.models.factory import (
     simulate_gbm_paths,
 )
 from src.models.registry import discover_components, registry
-from src.data.loader import MarketDataLoader
+from src.data import MarketDataLoader
 from src.research.experiment_mgr import run_experiment
 
 __all__ = [

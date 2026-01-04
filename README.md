@@ -60,7 +60,7 @@ model:
     sigma_max: 0.5
 ```
 
-Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantiates a lightweight synthetic loader with symbol/timeframe/window settings that can be swapped for real data sources.
+Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` now instantiates the canonical leak-safe loader with a `MockDataSource` and `ZScoreEngineer` so feature dimensions, model input size, and backtesting all stay aligned.
 
 ## Usage
 1. **Discover components automatically and run training**
@@ -81,8 +81,10 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
 
 4. **Programmatic usage (import as a package)**
    ```python
+   import torch
    from omegaconf import OmegaConf
    from open_synth_miner import create_model, MarketDataLoader
+   from src.data import MockDataSource, ZScoreEngineer
 
    cfg = OmegaConf.create(
        {
@@ -90,7 +92,7 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
                "_target_": "src.models.factory.SynthModel",
                "backbone": {
                    "_target_": "src.models.factory.HybridBackbone",
-                   "input_size": 4,
+                   "input_size": 3,
                    "d_model": 32,
                    "validate_shapes": True,  # probe each block with a dummy tensor
                    "blocks": [
@@ -100,16 +102,26 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
                },
                "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
            },
-           "training": {"horizon": 12, "n_paths": 128},
+           "training": {"horizon": 12, "n_paths": 128, "feature_dim": 3},
        }
    )
 
 # Build the model and prepare a quick window of synthetic prices.
 model = create_model(cfg)
-loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
-window = loader.latest_window()
-history = window["prices"].unsqueeze(0)  # [batch, seq_len, feature_dim]
-initial_price = history[:, -1, 0]
+source = MockDataSource(length=512, freq="1h")
+engineer = ZScoreEngineer()
+loader = MarketDataLoader(
+    data_source=source,
+    engineer=engineer,
+    assets=["BTC"],
+    input_len=96,
+    pred_len=cfg.training.horizon,
+    batch_size=16,
+    feature_dim=cfg.training.feature_dim,
+)
+sample = loader.dataset[0]
+history = sample["inputs"].T.unsqueeze(0)  # [batch, seq_len, feature_dim]
+initial_price = torch.ones(history.shape[0])
 
 paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
 print(paths.shape)  # (batch, n_paths, horizon)
@@ -144,7 +156,7 @@ See `docs/hf_market_data.md` for step-by-step instructions, walk-forward/hybrid 
 ## Directory Highlights
 - `src/models/registry.py`: Component/block/hybrid registries plus recursive discovery for decorator-based registration.
 - `src/models/factory.py`: Hydra-driven model creation (fresh or HF-loaded) and hybrid backbone wiring from recipes.
-- `src/data/loader.py`: Hydra-instantiable market data loader with reproducible slicing for training/backtests.
+- `src/data/market_data_loader.py`: Canonical leak-safe market data loader with pluggable sources and feature engineering.
 - `src/research/backtest.py`: Challenger-vs-champion engine computing interval CRPS and variance spread with W&B logging.
 - `src/tracking/hub_manager.py`: Hugging Face + W&B bridge that uploads taxonomy-structured artifacts and emits shareable reports.
 - `configs/`: Hydra configs for defaults, data presets, and hybrid model recipes.
