@@ -1,4 +1,4 @@
-"""Unified experiment class for training and backtesting ablations."""
+"""Unified experiment class for training and backtesting multiple ablation configurations."""
 from __future__ import annotations
 
 from typing import Any, Dict, Optional, Union
@@ -16,22 +16,29 @@ from src.research.trainer import Trainer
 
 class AblationExperiment:
     """
-    Single experiment unit that can either TRAIN a new model or BACKTEST an existing one.
+    Experiment suite that runs multiple model configurations sequentially.
 
     Modes:
-      - "train": Instantiates a fresh model from config, trains it, and returns val metrics.
-      - "backtest": Loads a model (local or HF), runs backtest on holdout data, returns metrics.
+      - "train": Instantiates fresh models from configs, trains them, and returns val metrics.
+      - "backtest": Loads existing models (local or HF), runs backtests, and returns metrics.
     """
 
     def __init__(
         self,
-        name: str,
-        cfg: Union[DictConfig, Dict[str, Any]],
+        configs: Dict[str, Union[DictConfig, Dict[str, Any]]],
         mode: str = "train",
         device: str = "auto",
     ) -> None:
-        self.name = name
-        self.cfg = cfg if isinstance(cfg, DictConfig) else OmegaConf.create(cfg)
+        """
+        Args:
+            configs: Dictionary mapping experiment names to their Hydra/OmegaConf configurations.
+            mode: "train" or "backtest".
+            device: "cpu", "cuda", or "auto".
+        """
+        self.configs = {
+            name: (cfg if isinstance(cfg, DictConfig) else OmegaConf.create(cfg))
+            for name, cfg in configs.items()
+        }
         self.mode = mode
 
         if device == "auto":
@@ -39,60 +46,79 @@ class AblationExperiment:
         else:
             self.device = torch.device(device)
 
-        self.model: Optional[torch.nn.Module] = None
-        self.metrics: Dict[str, Any] = {}
+        self.results: Dict[str, Dict[str, float]] = {}
 
-    def setup_model(self) -> torch.nn.Module:
-        """Initialize the model based on mode."""
-        print(f"[{self.name}] Initializing model on {self.device}...")
+    def _setup_model(self, name: str, cfg: DictConfig) -> torch.nn.Module:
+        """Initialize a single model based on mode and config."""
+        print(f"[{name}] Initializing model on {self.device}...")
 
         if self.mode == "train":
             # Create fresh model for training
-            self.model = create_model(self.cfg).to(self.device)
+            model = create_model(cfg).to(self.device)
         elif self.mode == "backtest":
             # Load existing model (supports "hf_repo_id" in config for HF loading)
-            self.model = get_model(self.cfg).to(self.device)
+            model = get_model(cfg).to(self.device)
         else:
             raise ValueError(f"Unknown mode: {self.mode}")
 
-        return self.model
+        return model
 
     def run(
         self,
         train_loader: Optional[DataLoader] = None,
         val_loader: Optional[DataLoader] = None,
         test_loader: Optional[DataLoader] = None,
-    ) -> Dict[str, Any]:
-        """Execute the experiment flow."""
-        self.setup_model()
+    ) -> Dict[str, Dict[str, float]]:
+        """
+        Execute the experiment flow for all configured variants.
+        
+        Returns:
+            Dict[str, Dict[str, float]]: A dictionary mapping experiment names to their metric results.
+        """
+        self.results = {}
 
-        if self.mode == "train":
-            if not train_loader or not val_loader:
-                raise ValueError("Train mode requires train_loader and val_loader")
-            return self._run_training(train_loader, val_loader)
+        for name, cfg in self.configs.items():
+            model = self._setup_model(name, cfg)
+            
+            if self.mode == "train":
+                if not train_loader or not val_loader:
+                    raise ValueError("Train mode requires train_loader and val_loader")
+                metrics = self._run_training(name, model, cfg, train_loader, val_loader)
+            elif self.mode == "backtest":
+                loader = test_loader or val_loader
+                if not loader:
+                    raise ValueError("Backtest mode requires test_loader (or val_loader)")
+                metrics = self._run_backtest(name, model, cfg, loader)
+            else:
+                raise ValueError(f"Unknown mode: {self.mode}")
 
-        if self.mode == "backtest":
-            loader = test_loader or val_loader
-            if not loader:
-                raise ValueError("Backtest mode requires test_loader (or val_loader)")
-            return self._run_backtest(loader)
+            self.results[name] = metrics
+            print(f"[{name}] Completed. Metrics: {metrics}\n")
 
-        raise ValueError(f"Unknown mode: {self.mode}")
+        return self.results
 
-    def _run_training(self, train_loader: DataLoader, val_loader: DataLoader) -> Dict[str, Any]:
-        """Train loop using src.research.trainer.Trainer."""
-        lr = self.cfg.training.get("lr", 1e-3)
-        optimizer = optim.Adam(self.model.parameters(), lr=lr)
+    def _run_training(
+        self, 
+        name: str, 
+        model: torch.nn.Module, 
+        cfg: DictConfig, 
+        train_loader: DataLoader, 
+        val_loader: DataLoader
+    ) -> Dict[str, float]:
+        """Train a single model variant."""
+        lr = cfg.training.get("lr", 1e-3)
+        optimizer = optim.Adam(model.parameters(), lr=lr)
 
         trainer = Trainer(
-            model=self.model,
+            model=model,
             optimizer=optimizer,
-            n_paths=self.cfg.training.get("n_paths", 100),
+            n_paths=cfg.training.get("n_paths", 100),
             device=self.device,
         )
 
-        epochs = self.cfg.training.get("epochs", 5)
+        epochs = cfg.training.get("epochs", 5)
         best_crps = float("inf")
+        best_metrics: Dict[str, float] = {}
 
         for epoch in range(epochs):
             train_loss = 0.0
@@ -107,35 +133,41 @@ class AblationExperiment:
             val_metrics = trainer.validate(val_loader)
 
             print(
-                f"[{self.name}] Epoch {epoch + 1} | Train: {avg_train:.4f} | Val CRPS: {val_metrics['val_crps']:.4f}"
+                f"[{name}] Epoch {epoch + 1} | Train: {avg_train:.4f} | Val CRPS: {val_metrics['val_crps']:.4f}"
             )
 
             if val_metrics["val_crps"] < best_crps:
                 best_crps = val_metrics["val_crps"]
-                self.metrics = val_metrics
+                best_metrics = val_metrics
 
-        return self.metrics
+        return best_metrics
 
-    def _run_backtest(self, loader: DataLoader) -> Dict[str, Any]:
-        """Backtest loop using src.research.backtest_runner.BacktestRunner."""
-        print(f"[{self.name}] Starting backtest...")
+    def _run_backtest(
+        self, 
+        name: str, 
+        model: torch.nn.Module, 
+        cfg: DictConfig, 
+        loader: DataLoader
+    ) -> Dict[str, float]:
+        """Backtest a single model variant."""
+        print(f"[{name}] Starting backtest...")
 
         scorer = CRPSMultiIntervalScorer(
-            time_increment=self.cfg.backtest.get("time_increment", 60)
+            time_increment=cfg.backtest.get("time_increment", 60)
         )
 
         runner = BacktestRunner(
-            models={self.name: self.model},
+            models={name: model},
             dataloader=loader,
             scorer=scorer,
             device=self.device,
         )
 
         results = runner.run(
-            horizon=self.cfg.training.get("horizon", 24),
-            n_paths=self.cfg.training.get("n_paths", 100),
+            horizon=cfg.training.get("horizon", 24),
+            n_paths=cfg.training.get("n_paths", 100),
         )
 
-        self.metrics = results[self.name]
-        print(f"[{self.name}] Results: {self.metrics}")
-        return self.metrics
+        # BacktestRunner returns Dict[model_name, Dict[interval, score]]
+        # We unwrap it to return just the metrics for this model
+        return results[name]
