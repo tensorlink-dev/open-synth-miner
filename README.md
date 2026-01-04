@@ -60,7 +60,7 @@ model:
     sigma_max: 0.5
 ```
 
-Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantiates a lightweight synthetic loader with symbol/timeframe/window settings that can be swapped for real data sources.
+Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` now instantiates the canonical leak-safe loader with a `MockDataSource` and `ZScoreEngineer` so feature dimensions, model input size, and backtesting all stay aligned.
 
 ## Usage
 1. **Discover components automatically and run training**
@@ -81,15 +81,18 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
 
 4. **Programmatic usage (import as a package)**
    ```python
+   import torch
    from omegaconf import OmegaConf
    from open_synth_miner import create_model, MarketDataLoader
+   from src.data import MockDataSource, ZScoreEngineer
 
    cfg = OmegaConf.create(
        {
            "model": {
+               "_target_": "src.models.factory.SynthModel",
                "backbone": {
                    "_target_": "src.models.factory.HybridBackbone",
-                   "input_size": 4,
+                   "input_size": 3,
                    "d_model": 32,
                    "validate_shapes": True,  # probe each block with a dummy tensor
                    "blocks": [
@@ -99,28 +102,61 @@ Data presets remain Hydra-friendly; `configs/data/default_loader.yaml` instantia
                },
                "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 32},
            },
-           "training": {"horizon": 12, "n_paths": 128},
+           "training": {"horizon": 12, "n_paths": 128, "feature_dim": 3},
        }
    )
 
 ```python
 model = create_model(cfg)
-loader = MarketDataLoader(symbols=["BTC", "ETH", "SOL", "ATOM"], timeframe="1h", window_size=64)
-window = loader.latest_window()
-history = window["prices"].unsqueeze(0)  # [batch, seq_len, feature_dim]
-initial_price = history[:, -1, 0]
+source = MockDataSource(length=512, freq="1h")
+engineer = ZScoreEngineer()
+loader = MarketDataLoader(
+    data_source=source,
+    engineer=engineer,
+    assets=["BTC"],
+    input_len=96,
+    pred_len=cfg.training.horizon,
+    batch_size=16,
+    feature_dim=cfg.training.feature_dim,
+)
+sample = loader.dataset[0]
+history = sample["inputs"].T.unsqueeze(0)  # [batch, seq_len, feature_dim]
+initial_price = torch.ones(history.shape[0])
 
 paths, mu, sigma = model(history, initial_price=initial_price, horizon=cfg.training.horizon, n_paths=cfg.training.n_paths)
 print(paths.shape)  # (batch, n_paths, horizon)
 ```
+Make sure you pass the full configuration (or the `model` node) to `create_model`/`get_model` before calling it—invoking a raw
+`DictConfig` from Hydra as if it were a module will raise `TypeError: 'DictConfig' object is not callable`.
 The top-level package now exposes factories, registries, and data utilities so you can prototype without drilling into submodules.
 
 Shape validation runs during `HybridBackbone` construction to catch blocks that inadvertently change sequence length or feature size. If you intentionally use a block with dynamic output shapes (e.g., pooling), set `validate_shapes: false` in the backbone config to bypass the dummy-tensor probe.
 
+## Hugging Face market data (tensorlink-dev/open-synth-training-data)
+Use the leak-safe `MarketDataLoader` with the public Hugging Face Parquet dataset published at [`tensorlink-dev/open-synth-training-data`](https://huggingface.co/datasets/tensorlink-dev/open-synth-training-data). A minimal example:
+```python
+import pandas as pd
+from src.data import HFParquetSource, MarketDataLoader, ZScoreEngineer
+
+source = HFParquetSource(
+    repo_id="tensorlink-dev/open-synth-training-data",
+    filename="prices.parquet",  # choose a parquet file from the repo
+    repo_type="dataset",  # ensure the Hub lookup hits the dataset endpoint
+    asset_column="asset",
+    price_column="price",
+    timestamp_column="timestamp",
+)
+loader = MarketDataLoader(source, ZScoreEngineer(), assets=["BTC"], input_len=96, pred_len=24, batch_size=64)
+train_dl, val_dl, test_dl = loader.static_holdout(pd.Timestamp("2023-01-01", tz="UTC"))
+```
+If you see a `401` while downloading, the repository may be private or gated; authenticate with `huggingface-cli login` or set
+`HF_TOKEN` so the Hub request can resolve the parquet files.
+See `docs/hf_market_data.md` for step-by-step instructions, walk-forward/hybrid examples, and safety notes.
+
 ## Directory Highlights
 - `src/models/registry.py`: Component/block/hybrid registries plus recursive discovery for decorator-based registration.
 - `src/models/factory.py`: Hydra-driven model creation (fresh or HF-loaded) and hybrid backbone wiring from recipes.
-- `src/data/loader.py`: Hydra-instantiable market data loader with reproducible slicing for training/backtests.
+- `src/data/market_data_loader.py`: Canonical leak-safe market data loader with pluggable sources and feature engineering.
 - `src/research/backtest.py`: Challenger-vs-champion engine computing interval CRPS and variance spread with W&B logging.
 - `src/tracking/hub_manager.py`: Hugging Face + W&B bridge that uploads taxonomy-structured artifacts and emits shareable reports.
 - `configs/`: Hydra configs for defaults, data presets, and hybrid model recipes.
