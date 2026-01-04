@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 520" role="img" aria-labelledby="title desc">
+  <title id="title">Open Synth Miner Architecture Overview</title>
+  <desc id="desc">Configuration flows into model architecture, data loading, experimentation, and tracking layers.</desc>
+  <style>
+    .box { fill: #f6f8fa; stroke: #1f2933; stroke-width: 2; rx: 8; ry: 8; }
+    .label { font-family: 'Inter', Arial, sans-serif; font-size: 14px; fill: #111827; }
+    .header { font-family: 'Inter', Arial, sans-serif; font-size: 16px; font-weight: 700; fill: #111827; }
+    .note { font-family: 'Inter', Arial, sans-serif; font-size: 12px; fill: #374151; }
+    .arrow { stroke: #1f2933; stroke-width: 2; marker-end: url(#arrowhead); fill: none; }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#1f2933" />
+    </marker>
+  </defs>
+
+  <!-- Configuration -->
+  <rect class="box" x="30" y="40" width="200" height="180" />
+  <text class="header" x="130" y="70" text-anchor="middle">1. Configuration</text>
+  <text class="label" x="130" y="100" text-anchor="middle">Hydra</text>
+  <text class="note" x="130" y="130" text-anchor="middle">configs/config.yaml</text>
+  <text class="note" x="130" y="150" text-anchor="middle">model/hybrid_v2.yaml</text>
+  <text class="note" x="130" y="170" text-anchor="middle">data/default_loader.yaml</text>
+
+  <!-- Model Architecture -->
+  <rect class="box" x="260" y="40" width="200" height="180" />
+  <text class="header" x="360" y="70" text-anchor="middle">2. Model Architecture</text>
+  <text class="label" x="360" y="100" text-anchor="middle">Registry &amp; Factory</text>
+  <text class="note" x="360" y="130" text-anchor="middle">HybridBackbone</text>
+  <text class="note" x="360" y="150" text-anchor="middle">Block discovery</text>
+  <text class="note" x="360" y="170" text-anchor="middle">HF loading (optional)</text>
+
+  <!-- Data Loading -->
+  <rect class="box" x="490" y="40" width="200" height="180" />
+  <text class="header" x="590" y="70" text-anchor="middle">3. Data Loading</text>
+  <text class="label" x="590" y="100" text-anchor="middle">MarketDataLoader</text>
+  <text class="note" x="590" y="130" text-anchor="middle">Feature engineering</text>
+  <text class="note" x="590" y="150" text-anchor="middle">Leak-safe slices</text>
+  <text class="note" x="590" y="170" text-anchor="middle">Hydra presets</text>
+
+  <!-- Experiment -->
+  <rect class="box" x="150" y="280" width="230" height="180" />
+  <text class="header" x="265" y="310" text-anchor="middle">4. Experiment &amp; Research</text>
+  <text class="label" x="265" y="340" text-anchor="middle">Training / Backtest</text>
+  <text class="note" x="265" y="365" text-anchor="middle">CRPS &amp; log-likelihood</text>
+  <text class="note" x="265" y="385" text-anchor="middle">Challenger vs. champion</text>
+
+  <!-- Tracking -->
+  <rect class="box" x="430" y="280" width="230" height="180" />
+  <text class="header" x="545" y="310" text-anchor="middle">5. Tracking &amp; MLOps</text>
+  <text class="label" x="545" y="340" text-anchor="middle">Weights &amp; Biases</text>
+  <text class="note" x="545" y="365" text-anchor="middle">HubManager uploads</text>
+  <text class="note" x="545" y="385" text-anchor="middle">Hugging Face Hub</text>
+
+  <!-- Arrows -->
+  <line class="arrow" x1="230" y1="130" x2="260" y2="130" />
+  <line class="arrow" x1="460" y1="130" x2="490" y2="130" />
+  <line class="arrow" x1="330" y1="220" x2="250" y2="280" />
+  <line class="arrow" x1="590" y1="220" x2="420" y2="280" />
+  <line class="arrow" x1="380" y1="370" x2="430" y2="370" />
+</svg>
