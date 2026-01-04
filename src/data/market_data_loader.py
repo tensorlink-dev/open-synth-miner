@@ -173,7 +173,7 @@ class HFParquetSource(DataSource):
     def __init__(
         self,
         repo_id: str,
-        filename: str,
+        filename: Union[str, List[str]],
         *,
         revision: Optional[str] = None,
         repo_type: Optional[str] = "dataset",
@@ -184,7 +184,7 @@ class HFParquetSource(DataSource):
         covariate_columns: Optional[List[str]] = None,
     ) -> None:
         self.repo_id = repo_id
-        self.filename = filename
+        self.filenames = [filename] if isinstance(filename, str) else list(filename)
         self.revision = revision
         self.repo_type = repo_type
         self.asset_column = asset_column
@@ -194,14 +194,18 @@ class HFParquetSource(DataSource):
         self.covariate_columns = covariate_columns
 
     def load_data(self, assets: List[str]) -> List[AssetData]:
-        file_path = hf_hub_download(
-            repo_id=self.repo_id,
-            filename=self.filename,
-            revision=self.revision,
-            repo_type=self.repo_type,
-        )
-        table = pq.read_table(file_path)
-        frame = table.to_pandas()
+        frames: List[pd.DataFrame] = []
+        for filename in self.filenames:
+            file_path = hf_hub_download(
+                repo_id=self.repo_id,
+                filename=filename,
+                revision=self.revision,
+                repo_type=self.repo_type,
+            )
+            table = pq.read_table(file_path)
+            frames.append(table.to_pandas())
+
+        frame = pd.concat(frames, ignore_index=True)
 
         if self.timestamp_column not in frame.columns:
             raise ValueError("Parquet source must include a timestamp column")
