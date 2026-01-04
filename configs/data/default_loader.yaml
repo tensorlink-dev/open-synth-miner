@@ -1,7 +1,17 @@
 data:
-  _target_: src.data.loader.MarketDataLoader
-  symbols: ["SYNTH"]
-  timeframe: "1min"
-  window_size: 256
-  feature_cols: []
-  data_path: null
+  _target_: src.data.market_data_loader.MarketDataLoader
+  data_source:
+    _target_: src.data.market_data_loader.MockDataSource
+    length: 5000
+    freq: "5min"
+    seed: 7
+    base_price: 100.0
+  engineer:
+    _target_: src.data.market_data_loader.ZScoreEngineer
+    short_win: 20
+    long_win: 200
+  assets: ["SYNTH"]
+  input_len: ${training.seq_len}
+  pred_len: ${training.horizon}
+  batch_size: ${training.batch_size}
+  feature_dim: 3

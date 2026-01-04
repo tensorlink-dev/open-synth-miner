@@ -6,7 +6,7 @@ from omegaconf import DictConfig, OmegaConf
 
 import wandb
 
-from src.data.loader import MarketDataLoader
+from src.data import MarketDataLoader
 from src.models.registry import discover_components
 from src.research.backtest import ChallengerVsChampion
 from src.research.experiment_mgr import run_experiment
@@ -47,8 +47,7 @@ def _backtest_flow(cfg: DictConfig) -> None:
     discover_components("src/models/components")
     data_cfg = cfg.get("data")
     loader: MarketDataLoader = hydra.utils.instantiate(data_cfg)
-    window = loader.get_backtest_window(start=0, end=loader.window_size)
-    prices = window["prices"]
+    prices = loader.get_price_series()
 
     challenger_cfg = cfg
     champion_cfg = {"model": {"hf_repo_id": cfg.backtest.champion_repo_id, "architecture": cfg.model}}

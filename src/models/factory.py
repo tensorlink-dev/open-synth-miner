@@ -1,4 +1,10 @@
-"""Universal model factory with Hydra integration and HF loading."""
+"""Universal model factory with Hydra integration and HF loading.
+
+Backbone registry blocks are expected to accept and return tensors shaped as
+``(batch, sequence_length, d_model)``. Implementations should preserve both the
+sequence length and feature dimension unless explicitly designed for dynamic
+shapes, in which case validation can be opt-out.
+"""
 from __future__ import annotations
 
 import inspect
@@ -44,13 +50,26 @@ class ParallelFusion(nn.Module):
 class HybridBackbone(BackboneBase):
     """Backbone that stitches Hydra-instantiated blocks or callables."""
 
-    def __init__(self, input_size: int, d_model: int, blocks: List[Any]):
+    def __init__(
+        self,
+        input_size: int,
+        d_model: int,
+        blocks: List[Any],
+        validate_shapes: bool = True,
+        strict_shapes: bool = True,
+        **_: Any,
+    ):
         super().__init__()
+        # Hydra can pass through extra keyword arguments (e.g., from config defaults);
+        # consume them to keep instantiation forward-compatible.
         if not blocks:
             raise ValueError("HybridBackbone requires a non-empty block list")
+        self.input_size = input_size
         self.input_proj = nn.Linear(input_size, d_model)
         self.d_model = d_model
         self.layers = nn.ModuleList([self._materialize_block(block) for block in blocks])
+        if validate_shapes:
+            self.validate_shapes(strict_shapes=strict_shapes)
         self.output_dim = self._infer_output_dim()
 
     def _materialize_block(self, block: Any) -> nn.Module:
@@ -72,9 +91,40 @@ class HybridBackbone(BackboneBase):
         return fn(**kwargs) if kwargs else fn()
 
     def _infer_output_dim(self) -> int:
-        sample = torch.zeros(1, 2, self.d_model)
-        out = self.forward(sample)
+        sample = torch.zeros(1, 2, self.input_size)
+        with torch.no_grad():
+            out = self.forward(sample)
         return out.shape[-1]
+
+    def validate_shapes(self, strict_shapes: bool = True) -> None:
+        """Ensure blocks preserve (batch, seq, d_model) shape contract."""
+
+        batch, seq = 2, 3
+        expected = (batch, seq, self.d_model)
+        with torch.no_grad():
+            h = self.input_proj(torch.zeros(batch, seq, self.input_size))
+            if h.shape != expected:
+                raise ValueError(
+                    "HybridBackbone input projection expected shape "
+                    f"{expected} but received {tuple(h.shape)}"
+                )
+
+            for idx, layer in enumerate(self.layers):
+                h_new = layer(h)
+                if h_new.shape != expected:
+                    message = (
+                        "HybridBackbone block validation: "
+                        f"block {idx} ({layer.__class__.__name__}) changed shape "
+                        f"from {expected} to {tuple(h_new.shape)}."
+                    )
+                    if strict_shapes:
+                        raise ValueError(
+                            message
+                            + " Blocks should preserve (batch, seq, d_model) unless "
+                            "dynamic shapes are explicitly enabled."
+                        )
+                    print(message)
+                h = h_new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.input_proj(x)
@@ -84,7 +134,17 @@ class HybridBackbone(BackboneBase):
 
 
 class SynthModel(nn.Module):
-    """Model wrapping a backbone and head for stochastic path generation."""
+    """Model wrapping a backbone and head for stochastic path generation.
+
+    Expected inputs
+    ----------------
+    * ``x``: price/feature history shaped ``(batch, time, features)``. The
+      feature dimension must align with the ``input_size`` configured on the
+      backbone (see ``configs/model``), which should mirror the feature
+      engineering output of the data loader.
+    * ``initial_price``: scalar per batch element representing the current
+      price level that anchors generated paths.
+    """
 
     def __init__(self, backbone: BackboneBase, head: HeadBase):
         super().__init__()
@@ -134,11 +194,17 @@ HEAD_REGISTRY = {
 
 
 def _maybe_instantiate(cfg: Any) -> Any:
-    if isinstance(cfg, DictConfig):
+    if isinstance(cfg, DictConfig) and cfg.get("_target_"):
         return instantiate(cfg)
     if isinstance(cfg, dict) and "_target_" in cfg:
         return instantiate(OmegaConf.create(cfg))
     return cfg
+
+
+def _to_container(cfg: Any) -> Any:
+    """Convert OmegaConf nodes to plain containers for safe downstream access."""
+
+    return OmegaConf.to_container(cfg, resolve=True) if isinstance(cfg, DictConfig) else cfg
 
 
 def _instantiate_architecture(model_cfg: Dict | DictConfig) -> nn.Module:
@@ -147,36 +213,63 @@ def _instantiate_architecture(model_cfg: Dict | DictConfig) -> nn.Module:
 
 
 def build_model(model_cfg: Dict | DictConfig) -> SynthModel:
-    model_cfg = _maybe_instantiate(model_cfg) if isinstance(model_cfg, DictConfig) else model_cfg
     if isinstance(model_cfg, SynthModel):
         return model_cfg
 
+    model_cfg = _to_container(model_cfg)
     if isinstance(model_cfg, dict) and "_target_" in model_cfg:
         return instantiate(OmegaConf.create(model_cfg))
 
-    backbone_cfg = model_cfg.get("backbone", {})
-    head_cfg = model_cfg.get("head", {})
-    backbone = _maybe_instantiate(backbone_cfg) if isinstance(backbone_cfg, DictConfig) else backbone_cfg
+    backbone_cfg = _to_container(model_cfg.get("backbone", {}))
+    head_cfg = _to_container(model_cfg.get("head", {}))
+
+    backbone = _maybe_instantiate(backbone_cfg)
     if not isinstance(backbone, BackboneBase):
         backbone = instantiate(OmegaConf.create(backbone_cfg))
+
     latent_size = getattr(backbone, "output_dim", None) or getattr(backbone, "d_model", None)
     if latent_size is None:
         raise ValueError("Backbone must expose output_dim for head construction")
+
     head_cfg_resolved = head_cfg
     if isinstance(head_cfg, dict) and "latent_size" not in head_cfg:
         head_cfg_resolved = {**head_cfg, "latent_size": latent_size}
-    head = _maybe_instantiate(head_cfg_resolved) if isinstance(head_cfg_resolved, DictConfig) else head_cfg_resolved
+
+    head = _maybe_instantiate(head_cfg_resolved)
     if not isinstance(head, HeadBase):
         head = instantiate(OmegaConf.create(head_cfg_resolved))
+
     return SynthModel(backbone=backbone, head=head)
 
 
-def create_model(cfg: DictConfig | Dict) -> SynthModel:
-    if isinstance(cfg, DictConfig):
-        return instantiate(cfg.model)
-    if isinstance(cfg, dict) and "model" in cfg and "_target_" in cfg["model"]:
-        return instantiate(OmegaConf.create(cfg["model"]))
-    return build_model(cfg.get("model", cfg))
+def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
+    """Instantiate a model from either a full config or a model-only node."""
+
+    # Accept already-built modules to keep the API idempotent.
+    if isinstance(cfg, SynthModel):
+        return cfg
+
+    model_cfg: Dict | DictConfig = cfg.get("model", cfg) if isinstance(cfg, (DictConfig, dict)) else cfg
+
+    # If users omit the top-level _target_, assume SynthModel when backbone/head are present.
+    if isinstance(model_cfg, DictConfig):
+        model_cfg = OmegaConf.to_container(model_cfg, resolve=True)
+    if isinstance(model_cfg, dict) and "_target_" not in model_cfg and (
+        "backbone" in model_cfg or "head" in model_cfg
+    ):
+        model_cfg = {"_target_": "src.models.factory.SynthModel", **model_cfg}
+
+    if isinstance(model_cfg, (DictConfig, dict)) and "_target_" in model_cfg:
+        return instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
+
+    model = build_model(model_cfg)
+    if isinstance(model, (DictConfig, dict)):
+        raise TypeError(
+            "create_model returned a configuration instead of a module. "
+            "Include `_target_: src.models.factory.SynthModel` in your model config "
+            "or pass an already-instantiated SynthModel."
+        )
+    return model
 
 
 def get_model(cfg: DictConfig | Dict) -> nn.Module:
