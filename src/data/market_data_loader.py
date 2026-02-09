@@ -335,17 +335,27 @@ class MarketDataset(Dataset):
             cache = self.engineer.prepare_cache_from_asset(asset)
             self.caches.append(cache)
 
-            total = len(asset.timestamps)
+            # Use cache length (may differ from asset after resampling)
+            if isinstance(cache, dict) and "returns" in cache:
+                total = len(cache["returns"])
+            else:
+                total = len(asset.timestamps)
             max_start = total - (self.input_len + self.pred_len)
             if max_start < 0:
                 continue
 
+            # Resampled engineers store timestamps in cache
+            if isinstance(cache, dict) and "timestamps" in cache:
+                ts_array = cache["timestamps"]
+            else:
+                ts_array = asset.timestamps
+
             for start in range(0, max_start + 1, self.stride):
                 decision_pos = start + self.input_len - 1
                 horizon_pos = decision_pos + self.pred_len
-                start_ts = _ts(asset.timestamps[start])
-                decision_ts = _ts(asset.timestamps[decision_pos])
-                horizon_ts = _ts(asset.timestamps[horizon_pos])
+                start_ts = _ts(ts_array[start])
+                decision_ts = _ts(ts_array[decision_pos])
+                horizon_ts = _ts(ts_array[horizon_pos])
 
                 vol = self.engineer.get_volatility(cache, start, self.input_len)
                 if vol < self.vol_thresholds[0]:
@@ -993,7 +1003,10 @@ class OHLCVEngineer(FeatureEngineer):
         log_close = np.log(np.clip(close_1h, 1e-12, None))
         returns = np.diff(log_close, prepend=log_close[0]).astype(np.float32)
         returns[~np.isfinite(returns)] = 0.0
-        return {"features": features, "returns": returns}
+        cache: Dict[str, np.ndarray] = {"features": features, "returns": returns}
+        if isinstance(df_1h.index, pd.DatetimeIndex):
+            cache["timestamps"] = df_1h.index.to_numpy()
+        return cache
 
     @staticmethod
     def _features_no_resample(df: pd.DataFrame) -> pd.DataFrame:
