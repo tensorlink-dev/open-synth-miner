@@ -197,3 +197,105 @@ class HorizonHead(HeadBase):
         mu = self.mu_proj(queries).squeeze(-1)                           # (batch, horizon)
         sigma = F.softplus(self.sigma_proj(queries)).squeeze(-1) + 1e-6  # (batch, horizon)
         return mu, sigma
+
+
+# ---------------------------------------------------------------------------
+# Neural Bridge Head (hierarchical macro + micro texture)
+# ---------------------------------------------------------------------------
+
+
+class NeuralBridgeHead(HeadBase):
+    """Hierarchical head: predicts 1-Hour *macro* move and sub-hour *micro* texture.
+
+    Instead of outputting ``(mu, sigma)`` for an external simulation loop, this
+    head produces the path tensor **directly** by combining:
+
+    1. **Macro projection** – a single predicted log-return for the full hour.
+    2. **Texture network** – learned deviations (wiggles) between start and end.
+    3. **Bridge constraint** – forces ``texture[0] == texture[-1] == 0`` so the
+       generated micro path starts at the current price and lands exactly at the
+       macro-predicted price.
+
+    Architecture::
+
+        h_t  (batch, d_model)   ← last-step backbone embedding
+              │
+         ┌────┴────┐
+         │         │
+         ▼         ▼
+      macro_proj  texture_net
+      (Linear→1)  (MLP → micro_steps)
+         │         │
+         │         ▼
+         │    Bridge constraint
+         │    (zero endpoints)
+         │         │
+         ▼         ▼
+      linear_path + bridge  →  micro_returns (batch, micro_steps)
+
+    The head can optionally convert log-returns to absolute prices when
+    ``current_price`` is supplied.
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    micro_steps:
+        Number of sub-hour steps to generate (e.g. 12 for 5-min, 60 for 1-min).
+    hidden_dim:
+        Hidden size of the texture MLP.
+    """
+
+    def __init__(self, latent_size: int, micro_steps: int = 12, hidden_dim: int = 64):
+        super().__init__()
+        self.micro_steps = micro_steps
+
+        # 1. Macro Projector (Where are we going in 1 hour?)
+        self.macro_proj = nn.Linear(latent_size, 1)
+
+        # 2. Texture Generator (How do we get there?)
+        self.texture_net = nn.Sequential(
+            nn.Linear(latent_size, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, micro_steps),
+        )
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        current_price: torch.Tensor | None = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+        current_price : (batch,), optional — anchors output as absolute prices
+
+        Returns
+        -------
+        macro_ret : (batch, 1) — predicted 1H log-return
+        micro_path : (batch, micro_steps) — sub-hour log-return path
+            (or absolute prices when ``current_price`` is given)
+        """
+        # A. Predict the Macro Destination (1 Hour later)
+        macro_ret = self.macro_proj(h_t)  # (batch, 1)
+
+        # B. Predict the Texture (the wiggles)
+        raw_texture = self.texture_net(h_t)  # (batch, micro_steps)
+
+        # C. Enforce Bridge Constraints (start=0, end=0)
+        texture = raw_texture - raw_texture[:, 0:1]  # shift so start == 0
+        # Rotate so end is also 0: texture_t -= (t/T) * texture_T
+        steps = torch.arange(self.micro_steps, device=h_t.device).float() / (self.micro_steps - 1)
+        correction = raw_texture[:, -1:] * steps.unsqueeze(0)
+        bridge = texture - correction
+
+        # D. Construct the Final Path
+        linear_path = macro_ret * steps.unsqueeze(0)  # (batch, micro_steps)
+        micro_returns = linear_path + bridge
+
+        # Optionally convert to absolute prices
+        if current_price is not None:
+            return macro_ret, current_price.unsqueeze(-1) * torch.exp(micro_returns)
+
+        return macro_ret, micro_returns

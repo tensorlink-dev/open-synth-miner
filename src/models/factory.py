@@ -19,7 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase
-from .heads import GBMHead, HorizonHead, SDEHead, HeadBase
+from .heads import GBMHead, HorizonHead, NeuralBridgeHead, SDEHead, HeadBase
 from .registry import discover_components
 
 
@@ -170,6 +170,11 @@ class SynthModel(nn.Module):
         n_paths: int = 1000,
         dt: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(self.head, NeuralBridgeHead):
+            h_t = self.backbone(x)
+            macro_ret, micro_path = self.head(h_t, current_price=initial_price)
+            return micro_path, macro_ret, micro_path
+
         if isinstance(self.head, HorizonHead):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
@@ -251,6 +256,7 @@ HEAD_REGISTRY = {
     "gbm": GBMHead,
     "sde": SDEHead,
     "horizon": HorizonHead,
+    "neural_bridge": NeuralBridgeHead,
 }
 
 
