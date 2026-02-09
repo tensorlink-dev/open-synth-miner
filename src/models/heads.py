@@ -9,6 +9,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchsde
 
 
 class HeadBase(nn.Module):
@@ -77,6 +78,155 @@ class SDEHead(HeadBase):
         mu = self.mu_out(features).squeeze(-1)
         sigma = F.softplus(self.sigma_out(features)).squeeze(-1) + 1e-6
         return mu, sigma
+
+
+# ---------------------------------------------------------------------------
+# Neural SDE head (proper SDE integration via torchsde)
+# ---------------------------------------------------------------------------
+
+
+class _LatentSDE(nn.Module):
+    """SDE dynamics conditioned on a backbone latent embedding.
+
+    Implements the ``f`` (drift) and ``g`` (diffusion) interface expected by
+    :func:`torchsde.sdeint`.  Both functions are neural networks that receive
+    the current state ``y`` (log-price, dim 1), the time ``t``, and the
+    backbone context vector, producing state-dependent, time-varying dynamics.
+    """
+
+    noise_type = "diagonal"
+    sde_type = "ito"
+
+    def __init__(self, latent_size: int, hidden: int = 64) -> None:
+        super().__init__()
+        in_dim = latent_size + 2  # context + y(1) + t(1)
+        self.f_net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, 1),
+        )
+        self.g_net = nn.Sequential(
+            nn.Linear(in_dim, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, 1),
+        )
+        self._ctx: torch.Tensor | None = None
+
+    def set_context(self, ctx: torch.Tensor) -> None:
+        """Bind the backbone context for the current integration call."""
+        self._ctx = ctx
+
+    def f(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        t_vec = t.expand(y.shape[0], 1)
+        inp = torch.cat([self._ctx, y, t_vec], dim=-1)
+        return self.f_net(inp)
+
+    def g(self, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        t_vec = t.expand(y.shape[0], 1)
+        inp = torch.cat([self._ctx, y, t_vec], dim=-1)
+        return F.softplus(self.g_net(inp)) + 1e-6
+
+
+class NeuralSDEHead(HeadBase):
+    """Neural SDE head using ``torchsde`` for numerically stable path integration.
+
+    Instead of outputting ``(mu, sigma)`` for external Euler-Maruyama simulation,
+    this head learns drift and diffusion *networks* and integrates them via
+    :func:`torchsde.sdeint` (or the adjoint variant for memory-efficient
+    training).
+
+    The SDE operates in log-price space::
+
+        d(log S) = f(t, log S | ctx) dt + g(t, log S | ctx) dW
+
+    where ``f`` and ``g`` are MLPs conditioned on the backbone embedding ``ctx``.
+    Paths are exponentiated back to price space before being returned.
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    hidden:
+        Hidden dimension of the drift / diffusion networks.
+    solver:
+        SDE solver passed to ``torchsde.sdeint``.  ``'euler'`` (default) is
+        fastest; ``'milstein'`` offers better strong convergence;
+        ``'srk'`` gives highest accuracy at greater cost.
+    adjoint:
+        If ``True``, use the adjoint method (O(1) memory) for backpropagation
+        through the solver.  Slightly slower per step but essential for long
+        horizons or limited GPU memory.
+    """
+
+    def __init__(
+        self,
+        latent_size: int,
+        hidden: int = 64,
+        solver: str = "euler",
+        adjoint: bool = False,
+    ) -> None:
+        super().__init__()
+        self.sde_func = _LatentSDE(latent_size, hidden)
+        self.solver = solver
+        self.adjoint = adjoint
+        # Summary projections for diagnostics / loss compatibility
+        self.mu_proj = nn.Linear(latent_size, 1)
+        self.sigma_proj = nn.Linear(latent_size, 1)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        initial_price: torch.Tensor,
+        horizon: int,
+        n_paths: int = 1000,
+        dt: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — backbone embedding
+        initial_price : (batch,) — current price per sample
+        horizon : number of simulation steps
+        n_paths : Monte-Carlo paths per sample
+        dt : time step size
+
+        Returns
+        -------
+        paths : (batch, n_paths, horizon) — simulated price paths
+        mu : (batch,) — summary drift estimate (diagnostic)
+        sigma : (batch,) — summary volatility estimate (diagnostic)
+        """
+        batch = h_t.shape[0]
+        device = h_t.device
+
+        # Diagnostic summary parameters
+        mu = self.mu_proj(h_t).squeeze(-1)
+        sigma = F.softplus(self.sigma_proj(h_t)).squeeze(-1) + 1e-6
+
+        # Expand context for n_paths: (batch, d) -> (batch * n_paths, d)
+        ctx = h_t.unsqueeze(1).expand(-1, n_paths, -1).reshape(batch * n_paths, -1)
+        self.sde_func.set_context(ctx)
+
+        # Initial state in log-space: (batch * n_paths, 1)
+        y0 = torch.log(initial_price).unsqueeze(-1)
+        y0 = y0.unsqueeze(1).expand(-1, n_paths, -1).reshape(batch * n_paths, 1)
+
+        # Time grid
+        ts = torch.linspace(0.0, horizon * dt, horizon + 1, device=device)
+
+        # Solve SDE
+        integrate = torchsde.sdeint_adjoint if self.adjoint else torchsde.sdeint
+        ys = integrate(self.sde_func, y0, ts, method=self.solver)
+        # ys: (horizon + 1, batch * n_paths, 1)
+
+        # Extract paths (skip t=0), clamp, convert from log-space
+        log_paths = ys[1:, :, 0].permute(1, 0)  # (batch * n_paths, horizon)
+        log_paths = torch.clamp(log_paths, min=-20.0, max=20.0)
+        paths = torch.exp(log_paths).reshape(batch, n_paths, horizon)
+
+        return paths, mu, sigma
 
 
 # ---------------------------------------------------------------------------

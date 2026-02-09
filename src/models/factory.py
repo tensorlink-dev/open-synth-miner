@@ -19,7 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase
-from .heads import GBMHead, HorizonHead, NeuralBridgeHead, SDEHead, HeadBase
+from .heads import GBMHead, HorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
 from .registry import discover_components
 
 # Maximum absolute log-return for numerical stability in exp() operations
@@ -174,6 +174,11 @@ class SynthModel(nn.Module):
         n_paths: int = 1000,
         dt: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(self.head, NeuralSDEHead):
+            h_t = self.backbone(x)
+            paths, mu, sigma = self.head(h_t, initial_price, horizon, n_paths, dt)
+            return paths, mu, sigma
+
         if isinstance(self.head, NeuralBridgeHead):
             h_t = self.backbone(x)
             macro_ret, micro_returns, sigma = self.head(h_t)
@@ -315,6 +320,7 @@ def simulate_bridge_paths(
 HEAD_REGISTRY = {
     "gbm": GBMHead,
     "sde": SDEHead,
+    "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
     "neural_bridge": NeuralBridgeHead,
 }

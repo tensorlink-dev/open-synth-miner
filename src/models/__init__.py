@@ -15,7 +15,7 @@ from src.models.factory import (
     get_model,
     simulate_gbm_paths,
 )
-from src.models.heads import GBMHead, HeadBase, SDEHead
+from src.models.heads import GBMHead, HeadBase, NeuralSDEHead, SDEHead
 from src.models.registry import discover_components, registry
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "get_model",
     "simulate_gbm_paths",
     "GBMHead",
+    "NeuralSDEHead",
     "SDEHead",
     "HeadBase",
     "discover_components",
