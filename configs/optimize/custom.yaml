@@ -1,0 +1,44 @@
+# Example: optimizing a custom FeatureEngineer subclass
+#
+# 1. Create your engineer anywhere, e.g. src/features/my_engineer.py:
+#
+#     from src.data.market_data_loader import FeatureEngineer
+#
+#     class MyEngineer(FeatureEngineer):
+#         def __init__(self, window: int = 20, alpha: float = 0.5, mode: str = "ema"):
+#             self.window = window
+#             self.alpha = alpha
+#             self.mode = mode
+#         ...  # implement prepare_cache, make_input, make_target, get_volatility
+#
+# 2. Run:
+#     python main.py mode=optimize optimize=custom \
+#         optimize.engineer._target_=src.features.my_engineer.MyEngineer
+#
+# Search-space param types:
+#   int:          { type: int, low: <min>, high: <max> }
+#   float:        { type: float, low: <min>, high: <max>, log: false }
+#   categorical:  { type: categorical, choices: [a, b, c] }
+#
+# static_params are passed to every trial without being searched.
+
+optimize:
+  n_trials: 50
+  sampler: tpe
+  n_samples: 500
+  input_len: 96
+  assets: ${data.assets}
+
+  engineer:
+    _target_: src.data.market_data_loader.ZScoreEngineer   # replace with your class
+    search_space:
+      short_win:
+        type: int
+        low: 5
+        high: 100
+      long_win:
+        type: int
+        low: 50
+        high: 500
+    # static_params:          # fixed kwargs passed to every trial
+    #   some_flag: true

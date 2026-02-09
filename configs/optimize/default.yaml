@@ -1,0 +1,28 @@
+# Configuration for Feature Optimization Mode
+# Run with:  python main.py mode=optimize
+#
+# Override from the CLI:
+#   python main.py mode=optimize optimize.n_trials=100 optimize.assets='[BTC,ETH]'
+#
+# Custom engineers:
+#   Use _target_ instead of type to point at any FeatureEngineer subclass.
+#   See configs/optimize/custom.yaml for an example.
+
+optimize:
+  n_trials: 50
+  sampler: tpe          # tpe | random
+  n_samples: 500        # feature windows sampled per trial
+  input_len: 96         # window length for feature extraction
+  assets: ${data.assets} # defaults to whatever data.assets provides
+
+  engineer:
+    type: zscore         # shorthand for src.data.market_data_loader.ZScoreEngineer
+    search_space:
+      short_win:
+        type: int
+        low: 5
+        high: 50
+      long_win:
+        type: int
+        low: 50
+        high: 500

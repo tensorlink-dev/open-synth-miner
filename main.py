@@ -66,6 +66,46 @@ def _backtest_flow(cfg: DictConfig) -> None:
     wandb.finish()
 
 
+def _optimize_flow(cfg: DictConfig) -> None:
+    from src.research.optimizer import FeatureOptimizer
+
+    opt_cfg = cfg.optimize
+    eng_label = opt_cfg.engineer.get("_target_", opt_cfg.engineer.get("type", "?"))
+    print(f"Starting Feature Optimization (trials={opt_cfg.n_trials}, "
+          f"engineer={eng_label}, sampler={opt_cfg.get('sampler', 'tpe')})")
+
+    optimizer = FeatureOptimizer(cfg)
+    result = optimizer.run()
+
+    params = result["best_params"]
+
+    # Separate toggles, windows, and other params for readability.
+    toggles_on = {k: v for k, v in params.items() if k.startswith("use_") and v is True}
+    toggles_off = {k: v for k, v in params.items() if k.startswith("use_") and v is False}
+    windows = {k: v for k, v in params.items() if k.endswith("_window")}
+    other = {k: v for k, v in params.items()
+             if not k.startswith("use_") and not k.endswith("_window")}
+
+    print(f"\nIntrinsic Dimension: {result['best_value']:.4f}")
+
+    if toggles_on:
+        print("\nEnabled features:")
+        for k in sorted(toggles_on):
+            print(f"  {k}: true")
+    if toggles_off:
+        print("\nDisabled features:")
+        for k in sorted(toggles_off):
+            print(f"  {k}: false")
+    if windows:
+        print("\nOptimal windows:")
+        for k, v in sorted(windows.items()):
+            print(f"  {k}: {v}")
+    if other:
+        print("\nOther parameters:")
+        for k, v in sorted(other.items()):
+            print(f"  {k}: {v}")
+
+
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     mode = cfg.get("mode", "train")
@@ -73,6 +113,8 @@ def main(cfg: DictConfig) -> None:
         _train_flow(cfg)
     elif mode == "backtest":
         _backtest_flow(cfg)
+    elif mode == "optimize":
+        _optimize_flow(cfg)
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 
