@@ -46,7 +46,7 @@ class TestHeadOutputShapes:
 
     def test_neural_bridge_head_returns_3_values(self):
         """NeuralBridgeHead should return (macro_ret, micro_returns, sigma)."""
-        head = NeuralBridgeHead(latent_size=128, pred_len=60, micro_steps=60)
+        head = NeuralBridgeHead(latent_size=128, micro_steps=12)
         h_t = torch.randn(4, 128)
         result = head(h_t)
 
@@ -54,20 +54,20 @@ class TestHeadOutputShapes:
         macro_ret, micro_returns, sigma = result
 
         assert macro_ret.shape == (4, 1), f"Expected (4, 1), got {macro_ret.shape}"
-        assert micro_returns.shape == (4, 60), f"Expected (4, 60), got {micro_returns.shape}"
+        assert micro_returns.shape == (4, 12), f"Expected (4, 12), got {micro_returns.shape}"
         assert sigma.shape == (4,), f"Expected (4,), got {sigma.shape}"
         assert (sigma > 0).all(), "Sigma should be positive"
 
     def test_neural_bridge_head_with_current_price(self):
         """NeuralBridgeHead with current_price should return absolute prices."""
-        head = NeuralBridgeHead(latent_size=128, pred_len=60, micro_steps=60)
+        head = NeuralBridgeHead(latent_size=128, micro_steps=12)
         h_t = torch.randn(4, 128)
         current_price = torch.tensor([100.0, 200.0, 150.0, 180.0])
 
         macro_ret, micro_path, sigma = head(h_t, current_price=current_price)
 
         # With current_price, micro_path should be absolute prices
-        assert micro_path.shape == (4, 60)
+        assert micro_path.shape == (4, 12)
         # Prices should be positive and scaled relative to current_price
         assert (micro_path > 0).all(), "Absolute prices should be positive"
 

@@ -6,7 +6,7 @@ data:
     repo_type: dataset
   engineer:
     _target_: src.data.market_data_loader.OHLCVEngineer
-    resample_rule: "1h"
+    resample_rule: "5min"
   assets: ["BTC_USD"]
   input_len: ${training.seq_len}
   pred_len: ${training.horizon}
