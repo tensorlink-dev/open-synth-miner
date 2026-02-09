@@ -27,6 +27,15 @@ class FeatureEngineer(abc.ABC):
     def prepare_cache(self, prices: np.ndarray) -> Any:
         """Pre-compute causal, leakage-safe artifacts for a full series."""
 
+    def prepare_cache_from_asset(self, asset: "AssetData") -> Any:
+        """Prepare cache from full asset data including covariates.
+
+        Override this in engineers that need OHLCV or other covariate
+        columns.  The default implementation delegates to
+        :meth:`prepare_cache` using only the close prices.
+        """
+        return self.prepare_cache(asset.prices)
+
     @abc.abstractmethod
     def make_input(self, cache: Any, start: int, length: int) -> torch.Tensor:
         """Create the model input tensor for a window starting at ``start``."""
@@ -139,6 +148,201 @@ class WaveletEngineer(FeatureEngineer):
     def make_target(self, cache: Any, start: int, length: int) -> torch.Tensor:
         target = cache["returns"][start : start + length]
         return torch.from_numpy(target[None, :]).float()
+
+    def get_volatility(self, cache: Any, start: int, length: int) -> float:
+        window = cache["returns"][start : start + length]
+        return float(np.std(window))
+
+
+class UniversalFeatureEngineer(FeatureEngineer):
+    """Configurable multi-feature engineer with OHLCV support.
+
+    Produces a variable-width feature matrix from up to 12 channels that
+    can be independently toggled on/off.  Window sizes for each feature
+    group are separate constructor parameters so they can be tuned by the
+    optimizer.
+
+    When covariates (open, high, low, volume) are unavailable the
+    engineer synthesises them from close prices so that it also works with
+    ``MockDataSource``.
+    """
+
+    def __init__(
+        self,
+        # Window parameters (in data-frequency steps, e.g. 5 min bars)
+        vol_window: int = 24,
+        skew_window: int = 144,
+        eff_window: int = 48,
+        vwap_window: int = 96,
+        shape_window: int = 12,
+        # Feature toggles
+        use_vol_realized: bool = True,
+        use_vol_parkinson: bool = True,
+        use_skew: bool = True,
+        use_kurtosis: bool = True,
+        use_efficiency: bool = True,
+        use_vwap: bool = False,
+        use_wicks: bool = True,
+        use_body: bool = True,
+        use_clv: bool = True,
+    ) -> None:
+        self.vol_window = vol_window
+        self.skew_window = skew_window
+        self.eff_window = eff_window
+        self.vwap_window = vwap_window
+        self.shape_window = shape_window
+
+        self.use_vol_realized = use_vol_realized
+        self.use_vol_parkinson = use_vol_parkinson
+        self.use_skew = use_skew
+        self.use_kurtosis = use_kurtosis
+        self.use_efficiency = use_efficiency
+        self.use_vwap = use_vwap
+        self.use_wicks = use_wicks
+        self.use_body = use_body
+        self.use_clv = use_clv
+
+    # -- helpers ----------------------------------------------------------
+
+    @staticmethod
+    def _safe_rolling(series: pd.Series, window: int, func: str) -> np.ndarray:
+        roller = series.rolling(window)
+        result = getattr(roller, func)()
+        return result.fillna(0.0).values.astype(np.float32)
+
+    def _build_ohlcv(self, asset: "AssetData") -> pd.DataFrame:
+        """Build an OHLCV DataFrame, synthesising missing columns."""
+        close = self.clean_prices(asset.prices)
+        n = len(close)
+        df = pd.DataFrame({"close": close})
+
+        cov_map: Dict[str, int] = {}
+        if asset.covariate_columns:
+            for idx, col in enumerate(asset.covariate_columns):
+                cov_map[col.lower()] = idx
+
+        def _get_col(name: str) -> Optional[np.ndarray]:
+            if name in cov_map and asset.covariates is not None:
+                return asset.covariates[:, cov_map[name]].astype(np.float64)
+            return None
+
+        for col in ("open", "high", "low"):
+            arr = _get_col(col)
+            df[col] = arr if arr is not None else close.copy()
+
+        vol = _get_col("volume")
+        df["volume"] = vol if vol is not None else np.ones(n, dtype=np.float64)
+
+        return df
+
+    # -- FeatureEngineer interface ----------------------------------------
+
+    def prepare_cache(self, prices: np.ndarray) -> Dict[str, Any]:
+        """Fallback when only close prices are available."""
+        dummy = AssetData(name="", timestamps=np.arange(len(prices)), prices=prices)
+        return self.prepare_cache_from_asset(dummy)
+
+    def prepare_cache_from_asset(self, asset: "AssetData") -> Dict[str, Any]:
+        df = self._build_ohlcv(asset)
+        close = df["close"].values
+
+        log_prices = np.log(close + 1e-12)
+        returns = np.diff(log_prices, prepend=log_prices[0]).astype(np.float32)
+        returns[~np.isfinite(returns)] = 0.0
+
+        feature_channels: List[np.ndarray] = [returns]  # channel 0 always
+
+        ret_series = pd.Series(returns)
+
+        # A. Volatility group
+        if self.use_vol_realized:
+            feature_channels.append(
+                self._safe_rolling(ret_series, self.vol_window, "std")
+            )
+        if self.use_vol_parkinson:
+            park_sq = np.log(
+                df["high"].values / (df["low"].values + 1e-8) + 1e-8
+            ) ** 2
+            park_vol = np.sqrt(
+                pd.Series(park_sq).rolling(self.vol_window).mean().fillna(0.0).values
+                / (4 * np.log(2))
+            ).astype(np.float32)
+            feature_channels.append(park_vol)
+
+        # B. Distribution group
+        if self.use_skew:
+            feature_channels.append(
+                self._safe_rolling(ret_series, self.skew_window, "skew")
+            )
+        if self.use_kurtosis:
+            feature_channels.append(
+                self._safe_rolling(ret_series, self.skew_window, "kurt")
+            )
+
+        # C. Trend / efficiency group
+        if self.use_efficiency:
+            close_s = pd.Series(close)
+            net = (close_s - close_s.shift(self.eff_window)).abs()
+            path = close_s.diff().abs().rolling(self.eff_window).sum()
+            eff = (net / (path + 1e-8)).fillna(0.0).values.astype(np.float32)
+            feature_channels.append(eff)
+
+        if self.use_vwap:
+            vol_s = pd.Series(df["volume"].values)
+            close_s = pd.Series(close)
+            pv = (close_s * vol_s).rolling(self.vwap_window).sum()
+            v = vol_s.rolling(self.vwap_window).sum()
+            vwap = pv / (v + 1e-8)
+            dev = ((close_s - vwap) / (vwap + 1e-8)).fillna(0.0).values.astype(np.float32)
+            feature_channels.append(dev)
+
+        # D. Micro-structure / candle-shape group
+        rnge = (df["high"].values - df["low"].values).astype(np.float64) + 1e-8
+
+        if self.use_wicks:
+            up_raw = (
+                df["high"].values
+                - np.maximum(df["open"].values, df["close"].values)
+            ) / rnge
+            down_raw = (
+                np.minimum(df["open"].values, df["close"].values)
+                - df["low"].values
+            ) / rnge
+            feature_channels.append(
+                pd.Series(up_raw).rolling(self.shape_window).mean().fillna(0.0).values.astype(np.float32)
+            )
+            feature_channels.append(
+                pd.Series(down_raw).rolling(self.shape_window).mean().fillna(0.0).values.astype(np.float32)
+            )
+
+        if self.use_body:
+            body_raw = np.abs(df["close"].values - df["open"].values) / rnge
+            feature_channels.append(
+                pd.Series(body_raw).rolling(self.shape_window).mean().fillna(0.0).values.astype(np.float32)
+            )
+
+        if self.use_clv:
+            clv_raw = (
+                (df["close"].values - df["low"].values)
+                - (df["high"].values - df["close"].values)
+            ) / rnge
+            feature_channels.append(
+                pd.Series(clv_raw).rolling(self.shape_window).mean().fillna(0.0).values.astype(np.float32)
+            )
+
+        # Stack to (N, n_features)
+        features = np.stack(feature_channels, axis=1).astype(np.float32)
+        features[~np.isfinite(features)] = 0.0
+
+        return {"features": features, "returns": returns}
+
+    def make_input(self, cache: Any, start: int, length: int) -> torch.Tensor:
+        window = cache["features"][start : start + length]
+        return torch.from_numpy(window).float().T  # (n_features, length)
+
+    def make_target(self, cache: Any, start: int, length: int) -> torch.Tensor:
+        target = cache["features"][start : start + length, 0:1]  # log returns
+        return torch.from_numpy(target).float().T  # (1, length)
 
     def get_volatility(self, cache: Any, start: int, length: int) -> float:
         window = cache["returns"][start : start + length]
@@ -321,7 +525,7 @@ class MarketDataset(Dataset):
             return pd.to_datetime(value, utc=True)
 
         for asset_idx, asset in enumerate(self.assets):
-            cache = self.engineer.prepare_cache(asset.prices)
+            cache = self.engineer.prepare_cache_from_asset(asset)
             self.caches.append(cache)
 
             total = len(asset.timestamps)

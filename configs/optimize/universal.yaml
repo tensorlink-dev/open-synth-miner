@@ -1,0 +1,64 @@
+# Universal feature engineer optimization
+# Run with:  python main.py mode=optimize optimize=universal
+#
+# Searches over 9 feature toggles + 5 window sizes.
+# Uses a complexity floor (min_id) to penalise trivially simple
+# feature sets that would hurt downstream 24h prediction.
+
+optimize:
+  n_trials: 100
+  sampler: tpe
+  n_samples: 500
+  input_len: 96
+  assets: ${data.assets}
+
+  # Complexity floor: if ID drops below this, add penalty.
+  min_id: 2.5
+  min_id_penalty: 5.0
+
+  engineer:
+    type: universal
+    search_space:
+      # ---- Window sizes (5-min steps) ----
+      vol_window:
+        type: int
+        low: 6           # 30 min
+        high: 96          # 8 hours
+      skew_window:
+        type: int
+        low: 48           # 4 hours
+        high: 288         # 24 hours
+      eff_window:
+        type: int
+        low: 24           # 2 hours
+        high: 144         # 12 hours
+      vwap_window:
+        type: int
+        low: 24           # 2 hours
+        high: 288         # 24 hours
+      shape_window:
+        type: int
+        low: 3            # 15 min
+        high: 24          # 2 hours
+
+      # ---- Feature toggles ----
+      use_vol_parkinson:
+        type: bool
+      use_skew:
+        type: bool
+      use_kurtosis:
+        type: bool
+      use_efficiency:
+        type: bool
+      use_vwap:
+        type: bool
+      use_wicks:
+        type: bool
+      use_body:
+        type: bool
+      use_clv:
+        type: bool
+
+    # Always-on features (not searched).
+    static_params:
+      use_vol_realized: true

@@ -23,12 +23,14 @@ Hydra ``_target_`` in the optimize config::
             type: float
             low: 0.01
             high: 1.0
+          enabled:
+            type: bool
           mode:
             type: categorical
             choices: [fast, precise]
 
-The built-in shorthands ``type: zscore`` and ``type: wavelet`` still work
-for backward compatibility.
+The built-in shorthands ``type: zscore``, ``type: wavelet``, and
+``type: universal`` still work for backward compatibility.
 """
 from __future__ import annotations
 
@@ -47,8 +49,6 @@ from src.data.market_data_loader import (
     AssetData,
     DataSource,
     FeatureEngineer,
-    WaveletEngineer,
-    ZScoreEngineer,
 )
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,7 @@ log = logging.getLogger(__name__)
 _SHORTHAND_TARGETS: Dict[str, str] = {
     "zscore": "src.data.market_data_loader.ZScoreEngineer",
     "wavelet": "src.data.market_data_loader.WaveletEngineer",
+    "universal": "src.data.market_data_loader.UniversalFeatureEngineer",
 }
 
 
@@ -77,13 +78,17 @@ def _suggest_param(trial: optuna.Trial, name: str, spec: DictConfig) -> Any:
         return trial.suggest_int(name, int(spec.low), int(spec.high))
     if ptype == "float":
         log_scale = bool(spec.get("log", False))
-        return trial.suggest_float(name, float(spec.low), float(spec.high), log=log_scale)
+        return trial.suggest_float(
+            name, float(spec.low), float(spec.high), log=log_scale
+        )
     if ptype == "categorical":
         return trial.suggest_categorical(name, list(spec.choices))
+    if ptype == "bool":
+        return trial.suggest_categorical(name, [True, False])
 
     raise ValueError(
         f"Unknown search_space type '{ptype}' for param '{name}'. "
-        "Supported: int, float, categorical"
+        "Supported: int, float, categorical, bool"
     )
 
 
@@ -112,6 +117,8 @@ class FeatureOptimizer:
         self.n_trials: int = opt.n_trials
         self.input_len: int = opt.get("input_len", 96)
         self.n_samples: int = opt.get("n_samples", 500)
+        self.min_id: float = float(opt.get("min_id", 0.0))
+        self.min_id_penalty: float = float(opt.get("min_id_penalty", 5.0))
 
         eng_cfg = opt.engineer
         self.search_space: DictConfig = eng_cfg.search_space
@@ -131,11 +138,14 @@ class FeatureOptimizer:
         else:
             raise ValueError(
                 "optimize.engineer must specify either '_target_' (dotted class path) "
-                "or 'type' (shorthand: zscore, wavelet)"
+                "or 'type' (shorthand: zscore, wavelet, universal)"
             )
 
         self.engineer_cls: type = _import_target(target_str)
-        if not (isinstance(self.engineer_cls, type) and issubclass(self.engineer_cls, FeatureEngineer)):
+        if not (
+            isinstance(self.engineer_cls, type)
+            and issubclass(self.engineer_cls, FeatureEngineer)
+        ):
             raise TypeError(
                 f"{target_str} does not resolve to a FeatureEngineer subclass"
             )
@@ -181,7 +191,7 @@ class FeatureOptimizer:
 
         all_features: List[np.ndarray] = []
         for asset in self.assets_data:
-            cache = engineer.prepare_cache(asset.prices)
+            cache = engineer.prepare_cache_from_asset(asset)
             n_total = len(asset.prices)
             max_start = n_total - self.input_len
             if max_start <= 0:
@@ -209,7 +219,11 @@ class FeatureOptimizer:
         X = self._extract_features(engineer)
 
         if X.shape[0] < 10:
-            log.warning("Trial %d: too few samples (%d), returning penalty.", trial.number, X.shape[0])
+            log.warning(
+                "Trial %d: too few samples (%d), returning penalty.",
+                trial.number,
+                X.shape[0],
+            )
             return 999.0
 
         scaler = StandardScaler()
@@ -218,10 +232,20 @@ class FeatureOptimizer:
         try:
             d_int = float(skdim.id.TwoNN().fit_transform(X_scaled))
         except Exception:
-            log.warning("Trial %d: TwoNN estimation failed, returning penalty.", trial.number)
+            log.warning(
+                "Trial %d: TwoNN estimation failed, returning penalty.",
+                trial.number,
+            )
             return 999.0
 
-        log.info("Trial %d  ID=%.3f  params=%s", trial.number, d_int, trial.params)
+        # Complexity floor: penalise trivially low ID (everything was
+        # toggled off leaving a near-constant manifold).
+        if self.min_id > 0 and d_int < self.min_id:
+            d_int += self.min_id_penalty
+
+        log.info(
+            "Trial %d  ID=%.3f  params=%s", trial.number, d_int, trial.params
+        )
         return d_int
 
     # ------------------------------------------------------------------
@@ -246,7 +270,9 @@ class FeatureOptimizer:
             sampler = optuna.samplers.TPESampler(seed=42)
 
         study = optuna.create_study(direction="minimize", sampler=sampler)
-        study.optimize(self.objective, n_trials=self.n_trials, show_progress_bar=True)
+        study.optimize(
+            self.objective, n_trials=self.n_trials, show_progress_bar=True
+        )
 
         return {
             "best_params": study.best_params,
