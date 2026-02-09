@@ -424,6 +424,7 @@ class MarketDataLoader:
     input_len: int
     pred_len: int
     batch_size: int = 64
+    stride: Optional[int] = None
     sort_on_load: bool = True
     gap_handling: str = "error"
     feature_dim: int = 3
