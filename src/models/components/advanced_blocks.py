@@ -453,6 +453,35 @@ class DLinearBlock(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Normalization Blocks
+# ---------------------------------------------------------------------------
+
+
+@registry.register_block("layernormblock")
+class LayerNormBlock(nn.Module):
+    """Standalone LayerNorm block for inter-block normalization.
+
+    Intended as a composable building block that can be inserted between
+    other blocks in a ``HybridBackbone`` stack, e.g.::
+
+        blocks = [
+            DLinearBlock(d_model=64, kernel_size=25),
+            LayerNormBlock(d_model=64),
+            DLinearBlock(d_model=64, kernel_size=25),
+        ]
+
+    Preserves the ``(batch, seq, d_model)`` shape contract.
+    """
+
+    def __init__(self, d_model: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        self.norm = nn.LayerNorm(d_model, eps=eps)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.norm(x)
+
+
+# ---------------------------------------------------------------------------
 # TimesNet (temporal 2D-variation modeling)
 # ---------------------------------------------------------------------------
 
