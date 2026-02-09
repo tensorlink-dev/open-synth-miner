@@ -774,6 +774,8 @@ class HFOHLCVSource(DataSource):
             return self.asset_files[asset]
         return self.filename_pattern.format(asset=asset)
 
+    _TIMESTAMP_ALIASES = ["timestamp", "date", "datetime", "time", "ts", "Date", "Datetime", "Timestamp"]
+
     def load_data(self, assets: List[str]) -> List[AssetData]:
         results: List[AssetData] = []
         for asset in assets:
@@ -786,8 +788,25 @@ class HFOHLCVSource(DataSource):
             )
             df = pq.read_table(local_path).to_pandas()
 
+            # Auto-detect timestamp column if the configured name is missing
             if self.ts_col not in df.columns:
-                raise ValueError(f"Missing timestamp column '{self.ts_col}' in {filename}")
+                detected = None
+                for alias in self._TIMESTAMP_ALIASES:
+                    if alias in df.columns:
+                        detected = alias
+                        break
+                # Fall back to a datetime-typed column
+                if detected is None:
+                    for col in df.columns:
+                        if pd.api.types.is_datetime64_any_dtype(df[col]):
+                            detected = col
+                            break
+                if detected is None:
+                    raise ValueError(
+                        f"Missing timestamp column '{self.ts_col}' in {filename}. "
+                        f"Available columns: {list(df.columns)}"
+                    )
+                df = df.rename(columns={detected: self.ts_col})
             df[self.ts_col] = pd.to_datetime(df[self.ts_col], utc=True)
             df = df.sort_values(self.ts_col)
 
