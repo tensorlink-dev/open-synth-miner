@@ -66,6 +66,22 @@ def _backtest_flow(cfg: DictConfig) -> None:
     wandb.finish()
 
 
+def _optimize_flow(cfg: DictConfig) -> None:
+    from src.research.optimizer import FeatureOptimizer
+
+    opt_cfg = cfg.optimize
+    print(f"Starting Feature Optimization (trials={opt_cfg.n_trials}, "
+          f"engineer={opt_cfg.engineer.type}, sampler={opt_cfg.get('sampler', 'tpe')})")
+
+    optimizer = FeatureOptimizer(cfg)
+    result = optimizer.run()
+
+    print("\nBest parameters found:")
+    for k, v in result["best_params"].items():
+        print(f"  {k}: {v}")
+    print(f"  intrinsic_dim: {result['best_value']:.4f}")
+
+
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     mode = cfg.get("mode", "train")
@@ -73,6 +89,8 @@ def main(cfg: DictConfig) -> None:
         _train_flow(cfg)
     elif mode == "backtest":
         _backtest_flow(cfg)
+    elif mode == "optimize":
+        _optimize_flow(cfg)
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 

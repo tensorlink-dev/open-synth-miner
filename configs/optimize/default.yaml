@@ -1,0 +1,19 @@
+# Configuration for Feature Optimization Mode
+# Run with:  python main.py mode=optimize
+#
+# Override from the CLI:
+#   python main.py mode=optimize optimize.n_trials=100 optimize.assets='[BTC,ETH]'
+
+optimize:
+  n_trials: 50
+  sampler: tpe          # tpe | random
+  n_samples: 500        # feature windows sampled per trial
+  input_len: 96         # window length for feature extraction
+  assets: ${data.assets} # defaults to whatever data.assets provides
+
+  engineer:
+    type: zscore         # zscore | wavelet
+    search_space:
+      # ZScore search ranges
+      short_win: [5, 50]
+      long_win: [50, 500]

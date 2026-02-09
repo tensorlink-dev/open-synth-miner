@@ -1,0 +1,15 @@
+# Wavelet engineer optimization configuration
+# Run with:  python main.py mode=optimize optimize=wavelet
+
+optimize:
+  n_trials: 50
+  sampler: tpe
+  n_samples: 500
+  input_len: 96
+  assets: ${data.assets}
+
+  engineer:
+    type: wavelet
+    search_space:
+      level: [2, 6]
+      wavelet: ["db2", "db4", "db6", "db8", "sym4", "sym6"]

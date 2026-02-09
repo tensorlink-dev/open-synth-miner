@@ -1,6 +1,7 @@
 defaults:
   - model: hybrid_v2
   - data: default_loader
+  - optional optimize: default
 
 mode: train
 project: synth-miner
