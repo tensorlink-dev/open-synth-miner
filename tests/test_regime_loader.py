@@ -5,12 +5,23 @@ import pytest
 
 from src.data.regime_loader import (
     HOURLY_FEATURE_NAMES,
+    AggregationStep,
+    ClusteringStrategy,
+    FeatureStep,
     Fold,
+    GaussianMixtureStrategy,
+    KMeansStrategy,
+    LogReturnTarget,
+    MultiColumnTarget,
+    OHLCVAggregation,
+    OHLCVFeatureStep,
     PipelineConfig,
+    RawReturnTarget,
     RegimeAwareDataset,
     RegimeBalancedSampler,
     RegimeDriftMonitor,
     RegimeTagger,
+    TargetBuilder,
     aggregate_5m_to_1h,
     asset_to_ohlcv_frame,
     engineer_features,
@@ -441,3 +452,336 @@ class TestAssetToOhlcvFrame:
         # Should create O=H=L=C=close, volume=1
         assert (df["open"] == df["close"]).all()
         assert (df["volume"] == 1.0).all()
+
+
+# ---------------------------------------------------------------------------
+# 8. ClusteringStrategy ABC
+# ---------------------------------------------------------------------------
+
+
+class TestClusteringStrategyABC:
+    def test_kmeans_strategy_fit_predict(self):
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(200, 2))
+        strategy = KMeansStrategy(n_clusters=3, random_state=42)
+        strategy.fit(X)
+        labels = strategy.predict(X)
+        assert labels.shape == (200,)
+        assert set(labels).issubset({0, 1, 2})
+        assert strategy.n_clusters == 3
+
+    def test_gmm_strategy_fit_predict(self):
+        rng = np.random.default_rng(42)
+        X = rng.normal(size=(200, 2))
+        strategy = GaussianMixtureStrategy(n_components=4, random_state=42)
+        strategy.fit(X)
+        labels = strategy.predict(X)
+        assert labels.shape == (200,)
+        assert set(labels).issubset({0, 1, 2, 3})
+        assert strategy.n_clusters == 4
+
+    def test_kmeans_predict_before_fit_raises(self):
+        strategy = KMeansStrategy(n_clusters=3)
+        with pytest.raises(RuntimeError):
+            strategy.predict(np.zeros((10, 2)))
+
+    def test_gmm_predict_before_fit_raises(self):
+        strategy = GaussianMixtureStrategy(n_components=3)
+        with pytest.raises(RuntimeError):
+            strategy.predict(np.zeros((10, 2)))
+
+    def test_custom_strategy_works_with_tagger(self):
+        """A custom ClusteringStrategy integrates with RegimeTagger."""
+
+        class FixedStrategy(ClusteringStrategy):
+            def __init__(self, n):
+                self._n = n
+            def fit(self, X):
+                return self
+            def predict(self, X):
+                return np.zeros(len(X), dtype=int)
+            @property
+            def n_clusters(self):
+                return self._n
+
+        df = _make_raw_5m(2880)
+        hourly = aggregate_5m_to_1h(df)
+        features = engineer_features(hourly)
+        tagger = RegimeTagger(n_regimes=2, clustering=FixedStrategy(2))
+        labels = tagger.fit_predict(features)
+        assert set(labels) == {0}
+
+
+# ---------------------------------------------------------------------------
+# 9. RegimeTagger with GMM clustering
+# ---------------------------------------------------------------------------
+
+
+class TestRegimeTaggerGMM:
+    def test_gmm_tagger_fit_predict(self):
+        df = _make_raw_5m(2880)
+        hourly = aggregate_5m_to_1h(df)
+        features = engineer_features(hourly)
+        strategy = GaussianMixtureStrategy(n_components=3, random_state=42)
+        tagger = RegimeTagger(n_regimes=3, clustering=strategy)
+        labels = tagger.fit_predict(features)
+        assert labels.shape == (len(features),)
+        assert len(set(labels)) >= 1  # At least one cluster used
+
+    def test_gmm_custom_vol_features(self):
+        df = _make_raw_5m(2880)
+        hourly = aggregate_5m_to_1h(df)
+        features = engineer_features(hourly)
+        strategy = GaussianMixtureStrategy(n_components=3)
+        tagger = RegimeTagger(
+            n_regimes=3,
+            clustering=strategy,
+            vol_features=["realized_vol", "parkinson_vol", "skew"],
+        )
+        labels = tagger.fit_predict(features)
+        assert labels.shape == (len(features),)
+
+
+# ---------------------------------------------------------------------------
+# 10. FeatureStep ABC
+# ---------------------------------------------------------------------------
+
+
+class TestFeatureStepABC:
+    def test_ohlcv_feature_step(self):
+        df = _make_raw_5m(1440)
+        hourly = aggregate_5m_to_1h(df)
+        step = OHLCVFeatureStep()
+        features = step.transform(hourly)
+        assert list(features.columns) == HOURLY_FEATURE_NAMES
+        assert step.feature_names == HOURLY_FEATURE_NAMES
+
+    def test_ohlcv_feature_step_custom_windows(self):
+        df = _make_raw_5m(1440)
+        hourly = aggregate_5m_to_1h(df)
+        step = OHLCVFeatureStep(
+            realized_vol_window=12,
+            parkinson_vol_window=12,
+            smooth_window=3,
+        )
+        features = step.transform(hourly)
+        assert not features.isnull().any().any()
+
+    def test_custom_feature_step(self):
+        """A custom FeatureStep can produce arbitrary features."""
+        from typing import List
+
+        class SimpleFeatureStep(FeatureStep):
+            @property
+            def feature_names(self) -> List[str]:
+                return ["close", "volume"]
+
+            def transform(self, df_bars):
+                return df_bars[["close", "volume"]].copy()
+
+        df = _make_raw_5m(720)
+        hourly = aggregate_5m_to_1h(df)
+        step = SimpleFeatureStep()
+        features = step.transform(hourly)
+        assert list(features.columns) == ["close", "volume"]
+        assert len(features) == len(hourly)
+
+
+# ---------------------------------------------------------------------------
+# 11. AggregationStep ABC
+# ---------------------------------------------------------------------------
+
+
+class TestAggregationStepABC:
+    def test_ohlcv_aggregation_default(self):
+        df = _make_raw_5m(720)
+        agg = OHLCVAggregation()
+        result = agg.aggregate(df)
+        assert len(result) == 60
+
+    def test_ohlcv_aggregation_custom_rule(self):
+        df = _make_raw_5m(720)
+        agg = OHLCVAggregation(resample_rule="2h")
+        result = agg.aggregate(df)
+        assert len(result) == 30
+
+    def test_custom_aggregation_step(self):
+        """A custom AggregationStep can implement arbitrary aggregation."""
+
+        class PassthroughAggregation(AggregationStep):
+            def aggregate(self, df_raw):
+                return df_raw.copy()
+
+        df = _make_raw_5m(100)
+        agg = PassthroughAggregation()
+        result = agg.aggregate(df)
+        assert len(result) == 100
+
+
+# ---------------------------------------------------------------------------
+# 12. TargetBuilder ABC
+# ---------------------------------------------------------------------------
+
+
+class TestTargetBuilderABC:
+    def _make_features(self):
+        df = _make_raw_5m(1440)
+        hourly = aggregate_5m_to_1h(df)
+        return engineer_features(hourly)
+
+    def test_log_return_target(self):
+        features = self._make_features()
+        tb = LogReturnTarget()
+        targets = tb.build_targets(features)
+        assert targets.shape == (len(features),)
+        assert targets.dtype == np.float32
+        # First value should be 0 (no previous to diff against)
+        assert targets[0] == 0.0
+
+    def test_log_return_extract(self):
+        features = self._make_features()
+        tb = LogReturnTarget()
+        targets = tb.build_targets(features)
+        tensor = tb.extract_target(targets, start=10, length=5)
+        assert tensor.shape == (1, 5)  # (1, pred_len)
+
+    def test_raw_return_target(self):
+        features = self._make_features()
+        tb = RawReturnTarget()
+        targets = tb.build_targets(features)
+        assert targets.shape == (len(features),)
+        assert targets.dtype == np.float32
+
+    def test_raw_return_extract(self):
+        features = self._make_features()
+        tb = RawReturnTarget()
+        targets = tb.build_targets(features)
+        tensor = tb.extract_target(targets, start=10, length=5)
+        assert tensor.shape == (1, 5)
+
+    def test_multi_column_target(self):
+        features = self._make_features()
+        tb = MultiColumnTarget(columns=["close", "volume"])
+        targets = tb.build_targets(features)
+        assert targets.shape == (len(features), 2)
+        assert targets.dtype == np.float32
+
+    def test_multi_column_extract(self):
+        features = self._make_features()
+        tb = MultiColumnTarget(columns=["close", "volume"])
+        targets = tb.build_targets(features)
+        tensor = tb.extract_target(targets, start=10, length=5)
+        assert tensor.shape == (2, 5)  # (n_cols, pred_len)
+
+    def test_log_return_missing_column_raises(self):
+        features = self._make_features()
+        tb = LogReturnTarget(price_column="nonexistent")
+        with pytest.raises(ValueError, match="not in features"):
+            tb.build_targets(features)
+
+    def test_multi_column_missing_raises(self):
+        features = self._make_features()
+        tb = MultiColumnTarget(columns=["close", "nonexistent"])
+        with pytest.raises(ValueError, match="not in features"):
+            tb.build_targets(features)
+
+
+# ---------------------------------------------------------------------------
+# 13. RegimeAwareDataset with custom TargetBuilder
+# ---------------------------------------------------------------------------
+
+
+class TestRegimeAwareDatasetWithTargetBuilder:
+    def test_dataset_with_raw_return_target(self):
+        df = _make_raw_5m(2880)
+        hourly = aggregate_5m_to_1h(df)
+        features = engineer_features(hourly)
+        tagger = RegimeTagger(n_regimes=3)
+        labels = tagger.fit_predict(features)
+
+        ds = RegimeAwareDataset(
+            features, labels, seq_len=16, pred_len=4,
+            target_builder=RawReturnTarget(),
+        )
+        item = ds[0]
+        assert item["inputs"].shape == (len(HOURLY_FEATURE_NAMES), 16)
+        assert item["target"].shape == (1, 4)
+
+    def test_dataset_with_multi_column_target(self):
+        df = _make_raw_5m(2880)
+        hourly = aggregate_5m_to_1h(df)
+        features = engineer_features(hourly)
+        tagger = RegimeTagger(n_regimes=3)
+        labels = tagger.fit_predict(features)
+
+        ds = RegimeAwareDataset(
+            features, labels, seq_len=16, pred_len=4,
+            target_builder=MultiColumnTarget(columns=["close", "volume"]),
+        )
+        item = ds[0]
+        assert item["inputs"].shape == (len(HOURLY_FEATURE_NAMES), 16)
+        assert item["target"].shape == (2, 4)  # 2 target columns
+
+
+# ---------------------------------------------------------------------------
+# 14. run_pipeline with custom extension points
+# ---------------------------------------------------------------------------
+
+
+class TestRunPipelineCustom:
+    def test_pipeline_with_gmm_and_raw_returns(self):
+        df = _make_raw_5m(5000)
+        cfg = PipelineConfig(
+            train_size=100,
+            val_size=30,
+            test_size=30,
+            step_size=30,
+            gap_size=5,
+            seq_len=16,
+            pred_len=4,
+            clustering=GaussianMixtureStrategy(n_components=3),
+            target_builder=RawReturnTarget(),
+            balance_strength=0.8,
+            batch_size=8,
+        )
+        fold_loaders = run_pipeline(df, cfg)
+        assert len(fold_loaders) > 0
+
+        fl = fold_loaders[0]
+        for batch in fl.train_loader:
+            assert batch["inputs"].dim() == 3
+            assert batch["target"].dim() == 3
+            break
+
+    def test_pipeline_with_custom_vol_features(self):
+        df = _make_raw_5m(5000)
+        cfg = PipelineConfig(
+            train_size=100,
+            val_size=30,
+            test_size=30,
+            step_size=30,
+            gap_size=5,
+            seq_len=16,
+            pred_len=4,
+            vol_features=["realized_vol", "parkinson_vol", "skew"],
+            balance_strength=0.8,
+            batch_size=8,
+        )
+        fold_loaders = run_pipeline(df, cfg)
+        assert len(fold_loaders) > 0
+
+    def test_pipeline_with_custom_aggregation(self):
+        df = _make_raw_5m(10000)
+        cfg = PipelineConfig(
+            aggregation=OHLCVAggregation(resample_rule="2h"),
+            train_size=50,
+            val_size=15,
+            test_size=15,
+            step_size=15,
+            gap_size=3,
+            seq_len=8,
+            pred_len=2,
+            batch_size=4,
+        )
+        fold_loaders = run_pipeline(df, cfg)
+        assert len(fold_loaders) > 0
