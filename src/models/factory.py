@@ -231,9 +231,9 @@ def simulate_gbm_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * torch.sqrt(torch.tensor(dt, device=mu.device)) * eps
     log_returns = drift + diffusion
-    log_returns = torch.clamp(log_returns, min=-MAX_LOG_RETURN_CLAMP, max=MAX_LOG_RETURN_CLAMP)
-    steps = torch.exp(log_returns)
-    paths = initial_price * torch.cumprod(steps, dim=2)
+    cum_log_returns = torch.cumsum(log_returns, dim=2)
+    cum_log_returns = torch.clamp(cum_log_returns, min=-80.0, max=80.0)
+    paths = initial_price * torch.exp(cum_log_returns)
     return paths
 
 
@@ -273,11 +273,11 @@ def simulate_horizon_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * sqrt_dt * eps
     log_returns = drift + diffusion
-    log_returns = torch.clamp(log_returns, min=-MAX_LOG_RETURN_CLAMP, max=MAX_LOG_RETURN_CLAMP)
-    steps = torch.exp(log_returns)
+    cum_log_returns = torch.cumsum(log_returns, dim=2)
+    cum_log_returns = torch.clamp(cum_log_returns, min=-80.0, max=80.0)
 
     initial_price = initial_price.view(batch, 1, 1)
-    paths = initial_price * torch.cumprod(steps, dim=2)
+    paths = initial_price * torch.exp(cum_log_returns)
     return paths
 
 
@@ -311,6 +311,7 @@ def simulate_bridge_paths(
     eps = torch.randn(batch, n_paths, micro_steps, device=device)
     sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
     log_returns = mu + s * sqrt_dt * eps
+    log_returns = torch.clamp(log_returns, min=-MAX_LOG_RETURN_CLAMP, max=MAX_LOG_RETURN_CLAMP)
 
     initial_price = initial_price.view(batch, 1, 1)
     paths = initial_price * torch.exp(log_returns)
