@@ -414,6 +414,137 @@ class MultiScalePatcher(nn.Module):
         return self.fusion(concatenated)
 
 
+# ---------------------------------------------------------------------------
+# DLinear (trend-seasonal decomposition + linear)
+# ---------------------------------------------------------------------------
+
+
+@registry.register_block("dlinearblock")
+class DLinearBlock(nn.Module):
+    """DLinear block: moving-average decomposition into trend + seasonal, each with a linear layer.
+
+    Based on "Are Transformers Effective for Time Series Forecasting?" (Zeng et al., 2023).
+    Preserves the ``(batch, seq, d_model)`` shape contract.
+    """
+
+    def __init__(self, d_model: int, kernel_size: int = 25) -> None:
+        super().__init__()
+        self.kernel_size = kernel_size
+        padding = (kernel_size - 1) // 2
+        self.avg_pool = nn.AvgPool1d(kernel_size=kernel_size, stride=1, padding=padding)
+        self.linear_trend = nn.Linear(d_model, d_model)
+        self.linear_seasonal = nn.Linear(d_model, d_model)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, d_model)
+        # Decompose along the feature dim per time step
+        x_t = x.transpose(1, 2)  # (batch, d_model, seq_len)
+        trend = self.avg_pool(x_t).transpose(1, 2)  # (batch, seq_len, d_model)
+        # Handle edge case where avg_pool changes length
+        if trend.shape[1] != x.shape[1]:
+            trend = F.interpolate(
+                trend.transpose(1, 2), size=x.shape[1], mode="linear", align_corners=False
+            ).transpose(1, 2)
+        seasonal = x - trend
+
+        trend_out = self.linear_trend(trend)
+        seasonal_out = self.linear_seasonal(seasonal)
+        return trend_out + seasonal_out
+
+
+# ---------------------------------------------------------------------------
+# TimesNet (temporal 2D-variation modeling)
+# ---------------------------------------------------------------------------
+
+
+class _InceptionBlock2D(nn.Module):
+    """Simplified Inception-style 2D convolution used inside TimesNetBlock."""
+
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.branch1 = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+        )
+        self.branch5 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(out_channels, out_channels, kernel_size=5, padding=2),
+        )
+        self.norm = nn.BatchNorm2d(out_channels)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        b1 = self.branch1(x)
+        b3 = self.branch3(x)
+        b5 = self.branch5(x)
+        return self.norm(b1 + b3 + b5)
+
+
+@registry.register_block("timesnetblock")
+class TimesNetBlock(nn.Module):
+    """TimesNet block: discovers dominant periods via FFT, reshapes into 2D, and applies Inception convolutions.
+
+    Based on "TimesNet: Temporal 2D-Variation Modeling" (Wu et al., 2023).
+    Preserves the ``(batch, seq, d_model)`` shape contract.
+    """
+
+    def __init__(self, d_model: int, top_k: int = 3, d_ff: int | None = None, dropout: float = 0.1) -> None:
+        super().__init__()
+        self.d_model = d_model
+        self.top_k = top_k
+        d_ff = d_ff or d_model
+        self.conv2d = _InceptionBlock2D(d_model, d_ff)
+        self.proj_back = nn.Linear(d_ff, d_model) if d_ff != d_model else nn.Identity()
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def _period_discovery(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Use FFT to find the top-k dominant periods."""
+        # x: (batch, seq_len, d_model)
+        xf = torch.fft.rfft(x.mean(dim=-1), dim=-1)  # (batch, freq)
+        amplitude = xf.abs()
+        # Exclude DC component (index 0)
+        amplitude[:, 0] = 0
+        eff_k = min(self.top_k, amplitude.shape[-1] - 1)
+        top_values, top_indices = torch.topk(amplitude, eff_k, dim=-1)
+        # Convert frequency indices to period lengths
+        periods = (x.shape[1] / (top_indices.float() + 1e-6)).clamp(min=2).long()
+        weights = F.softmax(top_values, dim=-1)
+        return periods, weights
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, seq_len, d_model = x.shape
+        periods, weights = self._period_discovery(x)
+
+        accumulated = torch.zeros_like(x)
+        for k in range(periods.shape[-1]):
+            # Use the median period across the batch for stable reshaping
+            period = int(periods[:, k].float().median().item())
+            period = max(2, min(period, seq_len))
+
+            # Pad sequence so it's evenly divisible by the period
+            n_segments = (seq_len + period - 1) // period
+            pad_len = n_segments * period - seq_len
+            x_pad = F.pad(x.transpose(1, 2), (0, pad_len), mode="replicate").transpose(1, 2)
+
+            # Reshape to 2D: (batch, d_model, n_segments, period)
+            x_2d = x_pad.transpose(1, 2).reshape(batch, d_model, n_segments, period)
+
+            # 2D convolution
+            out_2d = F.gelu(self.conv2d(x_2d))
+            # Reshape back: (batch, d_ff, n_segments * period) -> trim -> (batch, seq_len, d_ff)
+            out_1d = out_2d.reshape(batch, -1, n_segments * period)[:, :, :seq_len].transpose(1, 2)
+            out_1d = self.proj_back(out_1d)
+
+            # Weight by the period's importance
+            w = weights[:, k].unsqueeze(-1).unsqueeze(-1)  # (batch, 1, 1)
+            accumulated = accumulated + out_1d * w
+
+        return self.norm(x + self.dropout(accumulated))
+
+
 @registry.register_block("patchmixerblock")
 class PatchMixerBlock(nn.Module):
     """MLP-Mixer style block for patched time series."""
