@@ -63,7 +63,7 @@ def calculate_price_changes_over_intervals(
 ) -> np.ndarray:
     """Convert price paths into interval returns or absolute prices."""
     N, T = price_paths.shape
-    if T <= interval_steps:
+    if interval_steps <= 0 or T <= interval_steps:
         return np.full((N, 0), np.nan)
     interval_prices = price_paths[:, ::interval_steps]
     if interval_prices.shape[1] < 2:
@@ -92,6 +92,9 @@ def calculate_crps_for_paths(
 
         for interval_name, interval_seconds in SCORING_INTERVALS.items():
             interval_steps = get_interval_steps(interval_seconds, time_increment)
+            if interval_steps <= 0:
+                detailed.append({"Interval": interval_name, "Increment": "Total", "CRPS": 0.0})
+                continue
             absolute_price = interval_name.endswith("_abs")
 
             if absolute_price:
