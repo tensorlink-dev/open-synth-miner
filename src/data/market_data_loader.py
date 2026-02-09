@@ -11,6 +11,8 @@ import pyarrow.parquet as pq
 import pywt
 import torch
 from huggingface_hub import hf_hub_download
+from scipy.stats import kurtosis as sp_kurtosis
+from scipy.stats import skew as sp_skew
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Dataset, Subset
 
@@ -26,6 +28,15 @@ class FeatureEngineer(abc.ABC):
     @abc.abstractmethod
     def prepare_cache(self, prices: np.ndarray) -> Any:
         """Pre-compute causal, leakage-safe artifacts for a full series."""
+
+    def prepare_cache_from_asset(self, asset: "AssetData") -> Any:
+        """Pre-compute artifacts from the full :class:`AssetData` record.
+
+        Override this when the engineer needs OHLCV or covariate data beyond
+        the 1-D price array.  The default implementation delegates to
+        :meth:`prepare_cache` for backward compatibility.
+        """
+        return self.prepare_cache(asset.prices)
 
     @abc.abstractmethod
     def make_input(self, cache: Any, start: int, length: int) -> torch.Tensor:
@@ -321,7 +332,7 @@ class MarketDataset(Dataset):
             return pd.to_datetime(value, utc=True)
 
         for asset_idx, asset in enumerate(self.assets):
-            cache = self.engineer.prepare_cache(asset.prices)
+            cache = self.engineer.prepare_cache_from_asset(asset)
             self.caches.append(cache)
 
             total = len(asset.timestamps)
@@ -698,6 +709,317 @@ class MarketDataLoader:
                 cursor += step_size
 
         return generator(), holdout_loader
+
+
+# ---------------------------------------------------------------------------
+# OHLCV-aware source and feature engineering
+# ---------------------------------------------------------------------------
+
+_OHLCV_COLS = ["open", "high", "low", "close", "volume"]
+
+
+class HFOHLCVSource(DataSource):
+    """Load per-asset OHLCV parquet files from Hugging Face Hub.
+
+    The ``tensorlink-dev/open-synth-training-data`` repository stores candle
+    data in per-asset folders (``BTC_USD/``, ``ETH_USD/``, …).  This source
+    maps requested asset names to Hub paths and returns :class:`AssetData`
+    with ``close`` as the price array and ``open / high / low / volume`` as
+    covariates so that :class:`OHLCVEngineer` can access the full OHLCV record.
+
+    Parameters
+    ----------
+    repo_id:
+        Hugging Face dataset repository (e.g.
+        ``"tensorlink-dev/open-synth-training-data"``).
+    asset_files:
+        Mapping from asset name to the parquet path **inside** the repo
+        (e.g. ``{"BTC_USD": "BTC_USD/data.parquet"}``).  If ``None`` the
+        source auto-generates paths as ``"{asset}/data.parquet"``.
+    filename_pattern:
+        Python format-string used when ``asset_files`` is ``None``.
+        ``{asset}`` is replaced by the asset name.
+        Default: ``"{asset}/data.parquet"``.
+    """
+
+    def __init__(
+        self,
+        repo_id: str,
+        asset_files: Optional[Dict[str, str]] = None,
+        *,
+        filename_pattern: str = "{asset}/data.parquet",
+        revision: Optional[str] = None,
+        repo_type: Optional[str] = "dataset",
+        timestamp_column: str = "timestamp",
+        open_column: str = "open",
+        high_column: str = "high",
+        low_column: str = "low",
+        close_column: str = "close",
+        volume_column: str = "volume",
+    ) -> None:
+        self.repo_id = repo_id
+        self.asset_files = asset_files
+        self.filename_pattern = filename_pattern
+        self.revision = revision
+        self.repo_type = repo_type
+        self.ts_col = timestamp_column
+        self.open_col = open_column
+        self.high_col = high_column
+        self.low_col = low_column
+        self.close_col = close_column
+        self.vol_col = volume_column
+
+    def _resolve_filename(self, asset: str) -> str:
+        if self.asset_files and asset in self.asset_files:
+            return self.asset_files[asset]
+        return self.filename_pattern.format(asset=asset)
+
+    def load_data(self, assets: List[str]) -> List[AssetData]:
+        results: List[AssetData] = []
+        for asset in assets:
+            filename = self._resolve_filename(asset)
+            local_path = hf_hub_download(
+                repo_id=self.repo_id,
+                filename=filename,
+                revision=self.revision,
+                repo_type=self.repo_type,
+            )
+            df = pq.read_table(local_path).to_pandas()
+
+            if self.ts_col not in df.columns:
+                raise ValueError(f"Missing timestamp column '{self.ts_col}' in {filename}")
+            df[self.ts_col] = pd.to_datetime(df[self.ts_col], utc=True)
+            df = df.sort_values(self.ts_col)
+
+            col_map = {
+                self.open_col: "open",
+                self.high_col: "high",
+                self.low_col: "low",
+                self.close_col: "close",
+                self.vol_col: "volume",
+            }
+            missing = [orig for orig in col_map if orig not in df.columns]
+            if missing:
+                raise ValueError(f"Missing OHLCV columns {missing} in {filename}")
+
+            cov_cols = ["open", "high", "low", "volume"]
+            results.append(
+                AssetData(
+                    name=asset,
+                    timestamps=df[self.ts_col].to_numpy(),
+                    prices=df[col_map[self.close_col]].to_numpy(dtype=np.float64),
+                    covariate_columns=cov_cols,
+                    covariates=df[[col_map[c] for c in [self.open_col, self.high_col, self.low_col, self.vol_col]]].to_numpy(dtype=np.float64),
+                )
+            )
+        return results
+
+
+def _engineer_features_1h(df_raw: pd.DataFrame, resample_rule: str = "1h") -> pd.DataFrame:
+    """Aggregate raw OHLCV candles into 1-hour bars with micro-structure features.
+
+    Returns a DataFrame with 16 columns (see ``OHLCV_FEATURE_NAMES``) indexed
+    by the resampled timestamps.
+    """
+
+    df = df_raw.copy()
+
+    # Pre-calculations on raw bars
+    df["log_close"] = np.log(df["close"].clip(lower=1e-12))
+    df["log_ret"] = df["log_close"].diff()
+    df["park_sq"] = np.log(df["high"].clip(lower=1e-12) / df["low"].clip(lower=1e-12)) ** 2
+    df["typ_price"] = (df["high"] + df["low"] + df["close"]) / 3.0
+    df["pv"] = df["typ_price"] * df["volume"]
+    df["path_len"] = df["close"].diff().abs()
+    df["signed_vol"] = np.sign(df["close"].diff()) * df["volume"]
+
+    resampler = df.resample(resample_rule)
+    agg = resampler.agg(
+        {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "log_ret": ["std", lambda x: sp_skew(x, nan_policy="omit"), lambda x: sp_kurtosis(x, nan_policy="omit")],
+            "park_sq": "mean",
+            "pv": "sum",
+            "path_len": "sum",
+            "signed_vol": "sum",
+        }
+    )
+
+    # Flatten multi-index columns
+    agg.columns = ["_".join(col).strip() if col[1] else col[0] for col in agg.columns.values]
+    agg.rename(
+        columns={
+            "open_first": "open",
+            "high_max": "high",
+            "low_min": "low",
+            "close_last": "close",
+            "volume_sum": "volume",
+            "log_ret_std": "realized_vol",
+            "log_ret_<lambda_0>": "skew",
+            "log_ret_<lambda_1>": "kurtosis",
+        },
+        inplace=True,
+    )
+
+    # Post-aggregation derived features
+    const_4ln2 = 4.0 * np.log(2.0)
+    agg["parkinson_vol"] = np.sqrt(agg["park_sq_mean"] / const_4ln2)
+
+    net_move = (agg["close"] - agg["open"]).abs()
+    agg["efficiency"] = net_move / (agg["path_len_sum"] + 1e-8)
+
+    vwap = agg["pv_sum"] / (agg["volume"] + 1e-8)
+    agg["vwap_dev"] = (agg["close"] - vwap) / (vwap + 1e-8)
+
+    price_range = (agg["high"] - agg["low"]) + 1e-8
+    agg["up_wick"] = (agg["high"] - agg[["open", "close"]].max(axis=1)) / price_range
+    agg["down_wick"] = (agg[["open", "close"]].min(axis=1) - agg["low"]) / price_range
+    agg["body_size"] = (agg["close"] - agg["open"]).abs() / price_range
+    agg["clv"] = ((agg["close"] - agg["low"]) - (agg["high"] - agg["close"])) / price_range
+
+    feature_cols = [
+        "open", "high", "low", "close", "volume",
+        "realized_vol", "skew", "kurtosis", "parkinson_vol",
+        "efficiency", "vwap_dev", "signed_vol_sum",
+        "up_wick", "down_wick", "body_size", "clv",
+    ]
+    result = agg[feature_cols].copy()
+    result = result.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return result
+
+
+OHLCV_FEATURE_NAMES: List[str] = [
+    "open", "high", "low", "close", "volume",
+    "realized_vol", "skew", "kurtosis", "parkinson_vol",
+    "efficiency", "vwap_dev", "signed_vol_sum",
+    "up_wick", "down_wick", "body_size", "clv",
+]
+
+
+class OHLCVEngineer(FeatureEngineer):
+    """Resample raw OHLCV candles to 1-hour bars with 16 micro-structure features.
+
+    Features include Parkinson volatility, return skew/kurtosis, fractal
+    efficiency, VWAP deviation, wick ratios, body dominance, and close
+    location value.  The target is log-returns of the 1-hour close.
+
+    This engineer overrides :meth:`prepare_cache_from_asset` to consume the
+    full :class:`AssetData` record (OHLCV via covariates).
+
+    Parameters
+    ----------
+    resample_rule:
+        Pandas resample frequency string (default ``"1h"``).
+    """
+
+    def __init__(self, resample_rule: str = "1h") -> None:
+        self.resample_rule = resample_rule
+
+    # -- interface ---------------------------------------------------------
+
+    def prepare_cache(self, prices: np.ndarray) -> Any:
+        """Fallback when only a 1-D price array is available.
+
+        Constructs a minimal OHLCV frame where O=H=L=C=price and volume=1,
+        so the engineer still works with :class:`MockDataSource`.
+        """
+        p = self.clean_prices(prices)
+        df = pd.DataFrame(
+            {"open": p, "high": p, "low": p, "close": p, "volume": np.ones_like(p)},
+            index=pd.RangeIndex(len(p)),
+        )
+        return self._cache_from_df(df)
+
+    def prepare_cache_from_asset(self, asset: AssetData) -> Any:
+        """Build the 1-hour feature cache from the full OHLCV record."""
+        if asset.covariates is None or asset.covariate_columns is None:
+            return self.prepare_cache(asset.prices)
+
+        cov_map = {name: idx for idx, name in enumerate(asset.covariate_columns)}
+        needed = {"open", "high", "low", "volume"}
+        if not needed.issubset(cov_map):
+            return self.prepare_cache(asset.prices)
+
+        n = len(asset.prices)
+        close = self.clean_prices(asset.prices)
+        open_ = np.asarray(asset.covariates[:n, cov_map["open"]], dtype=np.float64)
+        high = np.asarray(asset.covariates[:n, cov_map["high"]], dtype=np.float64)
+        low = np.asarray(asset.covariates[:n, cov_map["low"]], dtype=np.float64)
+        volume = np.asarray(asset.covariates[:n, cov_map["volume"]], dtype=np.float64)
+
+        ts = asset.timestamps[:n]
+        index = pd.DatetimeIndex(pd.to_datetime(ts, utc=True))
+
+        df = pd.DataFrame(
+            {"open": open_, "high": high, "low": low, "close": close, "volume": volume},
+            index=index,
+        )
+        return self._cache_from_df(df)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _cache_from_df(self, df: pd.DataFrame) -> Dict[str, np.ndarray]:
+        if isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
+            df_1h = _engineer_features_1h(df, resample_rule=self.resample_rule)
+        else:
+            # Non-datetime index (MockDataSource fallback) — skip resample
+            df_1h = self._features_no_resample(df)
+
+        features = df_1h.values.astype(np.float32)  # (T_1h, 16)
+        close_1h = df_1h["close"].values.astype(np.float64)
+        log_close = np.log(np.clip(close_1h, 1e-12, None))
+        returns = np.diff(log_close, prepend=log_close[0]).astype(np.float32)
+        returns[~np.isfinite(returns)] = 0.0
+        return {"features": features, "returns": returns}
+
+    @staticmethod
+    def _features_no_resample(df: pd.DataFrame) -> pd.DataFrame:
+        """Compute features without resampling (for non-datetime-indexed data)."""
+        out = df[["open", "high", "low", "close", "volume"]].copy()
+        log_close = np.log(out["close"].clip(lower=1e-12))
+        log_ret = log_close.diff().fillna(0.0)
+
+        out["realized_vol"] = log_ret.rolling(60, min_periods=1).std().fillna(0.0)
+        out["skew"] = log_ret.rolling(60, min_periods=1).apply(
+            lambda x: sp_skew(x, nan_policy="omit"), raw=True
+        ).fillna(0.0)
+        out["kurtosis"] = log_ret.rolling(60, min_periods=1).apply(
+            lambda x: sp_kurtosis(x, nan_policy="omit"), raw=True
+        ).fillna(0.0)
+
+        park_sq = np.log(out["high"].clip(lower=1e-12) / out["low"].clip(lower=1e-12)) ** 2
+        out["parkinson_vol"] = np.sqrt(park_sq / (4.0 * np.log(2.0)))
+
+        net_move = (out["close"] - out["open"]).abs()
+        path_len = out["close"].diff().abs().rolling(60, min_periods=1).sum().fillna(1e-8)
+        out["efficiency"] = net_move / (path_len + 1e-8)
+
+        out["vwap_dev"] = 0.0
+        out["signed_vol_sum"] = (np.sign(out["close"].diff()) * out["volume"]).fillna(0.0)
+
+        price_range = (out["high"] - out["low"]) + 1e-8
+        out["up_wick"] = (out["high"] - out[["open", "close"]].max(axis=1)) / price_range
+        out["down_wick"] = (out[["open", "close"]].min(axis=1) - out["low"]) / price_range
+        out["body_size"] = (out["close"] - out["open"]).abs() / price_range
+        out["clv"] = ((out["close"] - out["low"]) - (out["high"] - out["close"])) / price_range
+
+        return out[OHLCV_FEATURE_NAMES].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    def make_input(self, cache: Any, start: int, length: int) -> torch.Tensor:
+        window = cache["features"][start : start + length]
+        return torch.from_numpy(window).float().T  # (16, length)
+
+    def make_target(self, cache: Any, start: int, length: int) -> torch.Tensor:
+        target = cache["returns"][start : start + length]
+        return torch.from_numpy(target[None, :]).float()  # (1, length)
+
+    def get_volatility(self, cache: Any, start: int, length: int) -> float:
+        window = cache["returns"][start : start + length]
+        return float(np.std(window))
 
 
 if __name__ == "__main__":
