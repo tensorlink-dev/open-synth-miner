@@ -14,6 +14,22 @@ from src.data.market_data_loader import (
     WaveletEngineer,
     ZScoreEngineer,
 )
+from src.data.regime_loader import (
+    HOURLY_FEATURE_NAMES,
+    Fold,
+    FoldLoaders,
+    PipelineConfig,
+    RegimeAwareDataset,
+    RegimeBalancedSampler,
+    RegimeDriftMonitor,
+    RegimeTagger,
+    aggregate_5m_to_1h,
+    asset_to_ohlcv_frame,
+    engineer_features,
+    generate_walk_forward_folds,
+    run_pipeline,
+    run_pipeline_from_source,
+)
 
 __all__ = [
     "MarketDataLoader",
@@ -28,4 +44,19 @@ __all__ = [
     "OHLCVEngineer",
     "OHLCV_FEATURE_NAMES",
     "AssetData",
+    # Regime-aware pipeline
+    "aggregate_5m_to_1h",
+    "engineer_features",
+    "RegimeTagger",
+    "generate_walk_forward_folds",
+    "Fold",
+    "RegimeBalancedSampler",
+    "RegimeAwareDataset",
+    "RegimeDriftMonitor",
+    "run_pipeline",
+    "run_pipeline_from_source",
+    "PipelineConfig",
+    "FoldLoaders",
+    "HOURLY_FEATURE_NAMES",
+    "asset_to_ohlcv_frame",
 ]
