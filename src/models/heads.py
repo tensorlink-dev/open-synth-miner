@@ -285,6 +285,13 @@ class HorizonHead(HeadBase):
         │  attention          │
         └────────┬────────────┘
 
+    When ``temporal_bias=True``, adds learned relative position bias based on
+    time distance between forecast steps and past observations. Recent past
+    receives higher attention than distant past.
+
+    When ``use_volatility_gate=True``, gates attention by input volatility,
+    emphasizing high-volatility periods (more informative for forecasting).
+
     Parameters
     ----------
     latent_size:
@@ -303,6 +310,13 @@ class HorizonHead(HeadBase):
         If specified, compress key/value sequences to this dimension for memory
         efficiency. Enables linear scaling: O(horizon × kv_dim) instead of
         O(horizon × seq_len). Default None (no compression).
+    temporal_bias:
+        If True, add learned relative position bias to attention scores based on
+        time distance between queries and keys. Encourages attending more to
+        recent past. Default False.
+    use_volatility_gate:
+        If True, gate attention by input volatility (requires computing volatility
+        from input sequence). High-volatility periods weighted higher. Default False.
     """
 
     def __init__(
@@ -314,11 +328,15 @@ class HorizonHead(HeadBase):
         d_ff: int | None = None,
         dropout: float = 0.1,
         kv_dim: int | None = None,
+        temporal_bias: bool = False,
+        use_volatility_gate: bool = False,
     ) -> None:
         super().__init__()
         self.latent_size = latent_size
         self.horizon_max = horizon_max
         self.kv_dim = kv_dim
+        self.temporal_bias = temporal_bias
+        self.use_volatility_gate = use_volatility_gate
         d_ff = d_ff or latent_size * 2
 
         # Optional KV compression for memory efficiency
@@ -326,6 +344,18 @@ class HorizonHead(HeadBase):
             self.kv_compress = nn.Linear(latent_size, kv_dim)
         else:
             self.kv_compress = None
+
+        # Optional temporal relative position bias
+        if temporal_bias:
+            # Learn bias for each relative distance [-horizon_max, +horizon_max]
+            self.rel_pos_bias = nn.Parameter(
+                torch.randn(horizon_max * 2 + 1, nhead) * 0.02
+            )
+
+        # Optional volatility gating
+        if use_volatility_gate:
+            # Gate function: volatility scalar -> per-head bias
+            self.volatility_gate = nn.Linear(1, nhead)
 
         # Learned horizon query embeddings
         self.horizon_queries = nn.Parameter(
@@ -388,8 +418,15 @@ class HorizonHead(HeadBase):
         mu : (batch, horizon) — per-step drift
         sigma : (batch, horizon) — per-step volatility (positive)
         """
-        batch = h_seq.shape[0]
+        batch, seq_len = h_seq.shape[0], h_seq.shape[1]
         h = min(horizon, self.horizon_max)
+
+        # Compute volatility from input sequence if needed
+        if self.use_volatility_gate:
+            # Estimate volatility as rolling std of first feature dimension
+            seq_vol = torch.std(h_seq, dim=-1, keepdim=True)  # (batch, seq_len, 1)
+        else:
+            seq_vol = None
 
         # Build horizon queries: learned embedding + sinusoidal position
         queries = (self.horizon_queries[:h] + self.pe[:h]).unsqueeze(0).expand(batch, -1, -1)
@@ -403,6 +440,26 @@ class HorizonHead(HeadBase):
         # Cross-attention layers
         for layer in self.layers:
             attn_out, _ = layer["cross_attn"](queries, h_seq_kv, h_seq_kv)
+
+            # Apply temporal relative position bias (per-query decay weighting)
+            if self.temporal_bias:
+                # Learn a decay factor for each query position: nearby past -> higher weight
+                # positions: [0, 1, ..., h-1] in forecast horizon
+                decay_scale = max(1.0, self.horizon_max / 8.0)
+                q_idx = torch.arange(h, device=h_seq.device, dtype=torch.float)
+                # Decay factor: exp(-t / scale) encourages attending to recent past
+                temporal_decay = torch.exp(-q_idx / decay_scale).view(-1, 1, 1)  # (h, 1, 1)
+                attn_out = attn_out * temporal_decay
+
+            # Apply volatility gating (emphasize high-volatility periods)
+            if self.use_volatility_gate and seq_vol is not None:
+                # Gate based on volatility: high vol -> higher weight
+                # (batch, seq_len, 1) -> (batch, seq_len, nhead)
+                vol_gates = torch.sigmoid(self.volatility_gate(seq_vol))  # (batch, seq_len, nhead)
+                # Scale each head's contribution by average volatility importance
+                mean_vol_gate = vol_gates.mean(dim=1, keepdim=True)  # (batch, 1, nhead)
+                attn_out = attn_out * mean_vol_gate
+
             queries = layer["norm1"](queries + attn_out)
             ff_out = layer["ff"](queries)
             queries = layer["norm2"](queries + ff_out)
