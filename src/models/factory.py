@@ -204,6 +204,7 @@ def simulate_gbm_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * torch.sqrt(torch.tensor(dt, device=mu.device)) * eps
     log_returns = drift + diffusion
+    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
     steps = torch.exp(log_returns)
     paths = initial_price * torch.cumprod(steps, dim=2)
     return paths
@@ -245,6 +246,7 @@ def simulate_horizon_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * sqrt_dt * eps
     log_returns = drift + diffusion
+    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
     steps = torch.exp(log_returns)
 
     initial_price = initial_price.view(batch, 1, 1)
