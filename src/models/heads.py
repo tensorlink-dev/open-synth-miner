@@ -23,10 +23,12 @@ class GBMHead(HeadBase):
 
     def __init__(self, latent_size: int):
         super().__init__()
+        self.norm = nn.LayerNorm(latent_size)
         self.mu_proj = nn.Linear(latent_size, 1)
         self.sigma_proj = nn.Linear(latent_size, 1)
 
     def forward(self, h_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        h_t = self.norm(h_t)
         mu = self.mu_proj(h_t).squeeze(-1)
         sigma = F.softplus(self.sigma_proj(h_t)).squeeze(-1) + 1e-6
         return mu, sigma
@@ -249,6 +251,7 @@ class NeuralBridgeHead(HeadBase):
     def __init__(self, latent_size: int, micro_steps: int = 12, hidden_dim: int = 64):
         super().__init__()
         self.micro_steps = micro_steps
+        self.norm = nn.LayerNorm(latent_size)
 
         # 1. Macro Projector (Where are we going in 1 hour?)
         self.macro_proj = nn.Linear(latent_size, 1)
@@ -281,6 +284,9 @@ class NeuralBridgeHead(HeadBase):
             (or absolute prices when ``current_price`` is given)
         sigma : (batch,) — predicted volatility scale for stochastic sampling
         """
+        # Normalize backbone output (critical for purely-linear backbones like DLinear)
+        h_t = self.norm(h_t)
+
         # A. Predict the Macro Destination (1 Hour later)
         macro_ret = self.macro_proj(h_t)  # (batch, 1)
 
@@ -303,6 +309,7 @@ class NeuralBridgeHead(HeadBase):
 
         # Optionally convert to absolute prices
         if current_price is not None:
+            micro_returns = torch.clamp(micro_returns, min=-20.0, max=20.0)
             return macro_ret, current_price.unsqueeze(-1) * torch.exp(micro_returns), sigma
 
         return macro_ret, micro_returns, sigma
