@@ -83,7 +83,10 @@ class Trainer:
             horizon=horizon,
             n_paths=self.n_paths,
         )
-        sim_paths = paths.transpose(1, 2)
+        if paths.ndim == 2:
+            sim_paths = paths.unsqueeze(-1)
+        else:
+            sim_paths = paths.transpose(1, 2)
         crps = crps_ensemble(sim_paths, target)
         loss = crps.mean()
         loss.backward()
@@ -121,7 +124,10 @@ class Trainer:
                 horizon=horizon,
                 n_paths=self.n_paths,
             )
-            sim_paths = paths.transpose(1, 2)
+            if paths.ndim == 2:
+                sim_paths = paths.unsqueeze(-1)
+            else:
+                sim_paths = paths.transpose(1, 2)
             crps = crps_ensemble(sim_paths, target)
 
             total_loss += crps.mean().item()
