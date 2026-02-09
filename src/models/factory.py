@@ -172,8 +172,11 @@ class SynthModel(nn.Module):
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if isinstance(self.head, NeuralBridgeHead):
             h_t = self.backbone(x)
-            macro_ret, micro_path = self.head(h_t, current_price=initial_price)
-            return micro_path, macro_ret, micro_path
+            macro_ret, micro_returns, sigma = self.head(h_t)
+            paths = simulate_bridge_paths(
+                initial_price, micro_returns, sigma, n_paths, dt,
+            )
+            return paths, macro_ret.squeeze(-1), sigma
 
         if isinstance(self.head, HorizonHead):
             h_seq = self.backbone.forward_sequence(x)
@@ -251,6 +254,42 @@ def simulate_horizon_paths(
 
     initial_price = initial_price.view(batch, 1, 1)
     paths = initial_price * torch.cumprod(steps, dim=2)
+    return paths
+
+
+def simulate_bridge_paths(
+    initial_price: torch.Tensor,
+    micro_returns: torch.Tensor,
+    sigma: torch.Tensor,
+    n_paths: int,
+    dt: float = 1.0,
+) -> torch.Tensor:
+    """Monte-Carlo paths around a NeuralBridge mean trajectory.
+
+    Parameters
+    ----------
+    initial_price : (batch,)
+    micro_returns : (batch, micro_steps) — mean cumulative log-returns from the bridge head
+    sigma : (batch,) — volatility scale
+    n_paths : number of stochastic paths to generate
+    dt : time-step scale
+
+    Returns
+    -------
+    paths : (batch, n_paths, micro_steps)
+    """
+    batch, micro_steps = micro_returns.shape
+    device = micro_returns.device
+
+    mu = micro_returns.unsqueeze(1)          # (batch, 1, micro_steps)
+    s = sigma.view(batch, 1, 1)              # (batch, 1, 1)
+
+    eps = torch.randn(batch, n_paths, micro_steps, device=device)
+    sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
+    log_returns = mu + s * sqrt_dt * eps
+
+    initial_price = initial_price.view(batch, 1, 1)
+    paths = initial_price * torch.exp(log_returns)
     return paths
 
 
@@ -370,6 +409,7 @@ __all__ = [
     "ParallelFusion",
     "simulate_gbm_paths",
     "simulate_horizon_paths",
+    "simulate_bridge_paths",
     "build_model",
     "create_model",
     "get_model",

@@ -263,11 +263,14 @@ class NeuralBridgeHead(HeadBase):
             nn.Linear(hidden_dim, micro_steps),
         )
 
+        # 3. Volatility Projector (How uncertain is the path?)
+        self.sigma_proj = nn.Linear(latent_size, 1)
+
     def forward(
         self,
         h_t: torch.Tensor,
         current_price: torch.Tensor | None = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Parameters
         ----------
@@ -277,8 +280,9 @@ class NeuralBridgeHead(HeadBase):
         Returns
         -------
         macro_ret : (batch, 1) — predicted 1H log-return
-        micro_path : (batch, micro_steps) — sub-hour log-return path
+        micro_path : (batch, micro_steps) — sub-hour mean log-return path
             (or absolute prices when ``current_price`` is given)
+        sigma : (batch,) — predicted volatility scale for stochastic sampling
         """
         # Normalize backbone output (critical for purely-linear backbones like DLinear)
         h_t = self.norm(h_t)
@@ -289,20 +293,23 @@ class NeuralBridgeHead(HeadBase):
         # B. Predict the Texture (the wiggles)
         raw_texture = self.texture_net(h_t)  # (batch, micro_steps)
 
-        # C. Enforce Bridge Constraints (start=0, end=0)
+        # C. Predict Volatility
+        sigma = F.softplus(self.sigma_proj(h_t)).squeeze(-1) + 1e-6  # (batch,)
+
+        # D. Enforce Bridge Constraints (start=0, end=0)
         texture = raw_texture - raw_texture[:, 0:1]  # shift so start == 0
         # Rotate so end is also 0: texture_t -= (t/T) * texture_T
         steps = torch.arange(self.micro_steps, device=h_t.device).float() / (self.micro_steps - 1)
         correction = raw_texture[:, -1:] * steps.unsqueeze(0)
         bridge = texture - correction
 
-        # D. Construct the Final Path
+        # E. Construct the Final Path
         linear_path = macro_ret * steps.unsqueeze(0)  # (batch, micro_steps)
         micro_returns = linear_path + bridge
 
         # Optionally convert to absolute prices
         if current_price is not None:
             micro_returns = torch.clamp(micro_returns, min=-20.0, max=20.0)
-            return macro_ret, current_price.unsqueeze(-1) * torch.exp(micro_returns)
+            return macro_ret, current_price.unsqueeze(-1) * torch.exp(micro_returns), sigma
 
-        return macro_ret, micro_returns
+        return macro_ret, micro_returns, sigma
