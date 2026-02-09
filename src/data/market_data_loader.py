@@ -845,8 +845,12 @@ class HFOHLCVSource(DataSource):
         return results
 
 
-def _engineer_features_1h(df_raw: pd.DataFrame, resample_rule: str = "1h") -> pd.DataFrame:
-    """Aggregate raw OHLCV candles into 1-hour bars with micro-structure features.
+def _engineer_ohlcv_features(df_raw: pd.DataFrame, resample_rule: str = "5min") -> pd.DataFrame:
+    """Aggregate raw OHLCV candles into resampled bars with micro-structure features.
+
+    The *resample_rule* should match the micro-step frequency used by the
+    prediction head (e.g. ``"5min"`` when ``NeuralBridgeHead(micro_steps=12)``
+    targets a 1-hour macro window with 12 × 5-min steps).
 
     Returns a DataFrame with 16 columns (see ``OHLCV_FEATURE_NAMES``) indexed
     by the resampled timestamps.
@@ -931,11 +935,17 @@ OHLCV_FEATURE_NAMES: List[str] = [
 
 
 class OHLCVEngineer(FeatureEngineer):
-    """Resample raw OHLCV candles to 1-hour bars with 16 micro-structure features.
+    """Resample raw OHLCV candles with 16 micro-structure features.
+
+    The *resample_rule* must be aligned with the prediction head's
+    micro-step granularity.  For example, when using
+    ``NeuralBridgeHead(micro_steps=12)`` the default ``"5min"`` rule
+    produces bars whose count (``pred_len=12``) spans exactly one 1-hour
+    macro window (12 × 5 min = 60 min).
 
     Features include Parkinson volatility, return skew/kurtosis, fractal
     efficiency, VWAP deviation, wick ratios, body dominance, and close
-    location value.  The target is log-returns of the 1-hour close.
+    location value.  The target is log-returns of the resampled close.
 
     This engineer overrides :meth:`prepare_cache_from_asset` to consume the
     full :class:`AssetData` record (OHLCV via covariates).
@@ -943,10 +953,12 @@ class OHLCVEngineer(FeatureEngineer):
     Parameters
     ----------
     resample_rule:
-        Pandas resample frequency string (default ``"1h"``).
+        Pandas resample frequency string (default ``"5min"``).  Must match
+        the micro-frequency of the prediction head so that ``pred_len``
+        steps cover the intended macro horizon.
     """
 
-    def __init__(self, resample_rule: str = "1h") -> None:
+    def __init__(self, resample_rule: str = "5min") -> None:
         self.resample_rule = resample_rule
 
     # -- interface ---------------------------------------------------------
@@ -994,7 +1006,7 @@ class OHLCVEngineer(FeatureEngineer):
 
     def _cache_from_df(self, df: pd.DataFrame) -> Dict[str, np.ndarray]:
         if isinstance(df.index, pd.DatetimeIndex) and len(df) > 1:
-            df_1h = _engineer_features_1h(df, resample_rule=self.resample_rule)
+            df_1h = _engineer_ohlcv_features(df, resample_rule=self.resample_rule)
         else:
             # Non-datetime index (MockDataSource fallback) — skip resample
             df_1h = self._features_no_resample(df)
