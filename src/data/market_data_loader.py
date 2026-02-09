@@ -428,19 +428,19 @@ class MarketDataLoader:
     sort_on_load: bool = True
     gap_handling: str = "error"
     feature_dim: int = 3
+    stride: int = 1
 
     def __post_init__(self) -> None:
         self.assets_data = self.data_source.load_data(self.assets)
         if not self.assets_data:
             raise ValueError("Data source returned no assets")
         self._normalize_assets()
-        stride = self.stride if self.stride is not None else (self.input_len + self.pred_len)
         self.dataset = MarketDataset(
             self.assets_data,
             engineer=self.engineer,
             input_len=self.input_len,
             pred_len=self.pred_len,
-            stride=stride,
+            stride=self.stride,
         )
         if len(self.dataset) == 0:
             raise ValueError("No windows available for the requested input/prediction lengths")
