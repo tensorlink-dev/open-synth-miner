@@ -12,6 +12,25 @@ from src.tracking.wandb_logger import log_experiment_results
 from .metrics import CRPSMultiIntervalScorer, crps_ensemble, log_likelihood
 
 
+def prepare_paths_for_crps(paths: torch.Tensor) -> torch.Tensor:
+    """Convert model paths (batch, n_paths, horizon) to CRPS format (batch, horizon, n_paths).
+
+    SynthModel returns paths shaped (batch, n_paths, horizon).
+    crps_ensemble expects (batch, horizon, n_paths) with ensemble members in last dimension.
+
+    Parameters
+    ----------
+    paths : torch.Tensor
+        Model output paths of shape (batch, n_paths, horizon)
+
+    Returns
+    -------
+    torch.Tensor
+        Transposed paths of shape (batch, horizon, n_paths) ready for CRPS computation
+    """
+    return paths.transpose(1, 2)
+
+
 class DataToModelAdapter:
     """Bridge between leak-safe loader batches and SynthModel inputs."""
 
@@ -86,10 +105,8 @@ class Trainer:
             horizon=horizon,
             n_paths=self.n_paths,
         )
-        if paths.ndim == 2:
-            sim_paths = paths.unsqueeze(-1)
-        else:
-            sim_paths = paths.transpose(1, 2)
+        # SynthModel.forward() enforces (batch, n_paths, horizon) shape for all head types
+        sim_paths = prepare_paths_for_crps(paths)
         crps = crps_ensemble(sim_paths, target)
         loss = crps.mean()
         loss.backward()
@@ -127,10 +144,8 @@ class Trainer:
                 horizon=horizon,
                 n_paths=self.n_paths,
             )
-            if paths.ndim == 2:
-                sim_paths = paths.unsqueeze(-1)
-            else:
-                sim_paths = paths.transpose(1, 2)
+            # SynthModel.forward() enforces (batch, n_paths, horizon) shape for all head types
+            sim_paths = prepare_paths_for_crps(paths)
             crps = crps_ensemble(sim_paths, target)
 
             total_loss += crps.mean().item()

@@ -22,6 +22,10 @@ from .backbones import BackboneBase
 from .heads import GBMHead, HorizonHead, NeuralBridgeHead, SDEHead, HeadBase
 from .registry import discover_components
 
+# Maximum absolute log-return for numerical stability in exp() operations
+# exp(20) ≈ 4.85e8, which is safe and non-restrictive for financial returns
+MAX_LOG_RETURN_CLAMP = 20.0
+
 
 class ParallelFusion(nn.Module):
     """Run multiple modules in parallel and fuse outputs by gating or concatenation."""
@@ -198,6 +202,21 @@ def simulate_gbm_paths(
     n_paths: int,
     dt: float = 1.0,
 ) -> torch.Tensor:
+    """Geometric Brownian Motion path simulation with constant drift and volatility.
+
+    Parameters
+    ----------
+    initial_price : (batch,)
+    mu : (batch,) — constant drift
+    sigma : (batch,) — constant volatility
+    horizon : number of time steps
+    n_paths : number of Monte Carlo paths
+    dt : time-step scale
+
+    Returns
+    -------
+    paths : (batch, n_paths, horizon)
+    """
     batch = initial_price.shape[0]
     initial_price = initial_price.view(batch, 1, 1)
     mu = mu.view(batch, 1, 1)
@@ -207,7 +226,7 @@ def simulate_gbm_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * torch.sqrt(torch.tensor(dt, device=mu.device)) * eps
     log_returns = drift + diffusion
-    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
+    log_returns = torch.clamp(log_returns, min=-MAX_LOG_RETURN_CLAMP, max=MAX_LOG_RETURN_CLAMP)
     steps = torch.exp(log_returns)
     paths = initial_price * torch.cumprod(steps, dim=2)
     return paths
@@ -249,7 +268,7 @@ def simulate_horizon_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * sqrt_dt * eps
     log_returns = drift + diffusion
-    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
+    log_returns = torch.clamp(log_returns, min=-MAX_LOG_RETURN_CLAMP, max=MAX_LOG_RETURN_CLAMP)
     steps = torch.exp(log_returns)
 
     initial_price = initial_price.view(batch, 1, 1)

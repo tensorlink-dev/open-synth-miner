@@ -12,9 +12,33 @@ import torch.nn.functional as F
 
 
 class HeadBase(nn.Module):
-    """Base interface for heads producing drift and volatility."""
+    """Base interface for heads producing stochastic simulation parameters.
 
-    def forward(self, h_t: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:  # pragma: no cover - interface
+    Heads map backbone latent representations to parameters for path simulation.
+    Different heads return different parameter sets:
+
+    - **GBMHead, SDEHead**: ``(mu, sigma)`` - drift and volatility scalars
+    - **HorizonHead**: ``(mu_seq, sigma_seq)`` - per-step drift and volatility sequences
+    - **NeuralBridgeHead**: ``(macro_ret, micro_returns, sigma)`` - macro target, micro
+      trajectory, and volatility scale
+
+    Concrete return types are documented in each subclass. SynthModel.forward() handles
+    head-specific outputs and enforces consistent (batch, n_paths, horizon) path tensors.
+    """
+
+    def forward(self, h_t: torch.Tensor) -> Tuple[torch.Tensor, ...]:  # pragma: no cover - interface
+        """Map latent representation to simulation parameters.
+
+        Parameters
+        ----------
+        h_t : torch.Tensor
+            Backbone output of shape (batch, latent_size)
+
+        Returns
+        -------
+        Tuple[torch.Tensor, ...]
+            Head-specific parameters. See subclass docstrings for exact return types.
+        """
         raise NotImplementedError
 
 
