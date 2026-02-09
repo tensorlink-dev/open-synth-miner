@@ -244,7 +244,7 @@ class HorizonHead(HeadBase):
     the full backbone sequence, allowing the model to express time-varying
     dynamics (volatility clustering, momentum decay, regime transitions).
 
-    Architecture::
+    Architecture (standard)::
 
         Backbone sequence  (batch, seq, d_model)
                 │
@@ -268,6 +268,23 @@ class HorizonHead(HeadBase):
                  ▼
         mu: (batch, horizon)   sigma: (batch, horizon)
 
+    When ``kv_dim`` is specified (for memory efficiency), keys/values are
+    compressed via a linear projection before attention::
+
+        Backbone sequence  (batch, seq, d_model)
+                │
+                ▼
+        ┌─────────────────────┐
+        │  KV Compression     │  Linear: d_model → kv_dim
+        │  (optional)         │
+        └────────┬────────────┘
+                 │
+                 ▼  (batch, seq, kv_dim)
+        ┌─────────────────────┐
+        │  Multi-head cross-   │  Q: (h, d_model), K/V: (kv_dim)
+        │  attention          │
+        └────────┬────────────┘
+
     Parameters
     ----------
     latent_size:
@@ -282,6 +299,10 @@ class HorizonHead(HeadBase):
         Hidden size of the per-layer feedforward network.
     dropout:
         Dropout applied inside attention and feedforward.
+    kv_dim:
+        If specified, compress key/value sequences to this dimension for memory
+        efficiency. Enables linear scaling: O(horizon × kv_dim) instead of
+        O(horizon × seq_len). Default None (no compression).
     """
 
     def __init__(
@@ -292,11 +313,19 @@ class HorizonHead(HeadBase):
         n_layers: int = 2,
         d_ff: int | None = None,
         dropout: float = 0.1,
+        kv_dim: int | None = None,
     ) -> None:
         super().__init__()
         self.latent_size = latent_size
         self.horizon_max = horizon_max
+        self.kv_dim = kv_dim
         d_ff = d_ff or latent_size * 2
+
+        # Optional KV compression for memory efficiency
+        if kv_dim is not None:
+            self.kv_compress = nn.Linear(latent_size, kv_dim)
+        else:
+            self.kv_compress = None
 
         # Learned horizon query embeddings
         self.horizon_queries = nn.Parameter(
@@ -321,6 +350,9 @@ class HorizonHead(HeadBase):
                 nn.ModuleDict(
                     {
                         "cross_attn": nn.MultiheadAttention(
+                            latent_size, nhead, dropout=dropout, batch_first=True,
+                            kdim=kv_dim, vdim=kv_dim,
+                        ) if kv_dim is not None else nn.MultiheadAttention(
                             latent_size, nhead, dropout=dropout, batch_first=True,
                         ),
                         "norm1": nn.LayerNorm(latent_size),
@@ -362,9 +394,15 @@ class HorizonHead(HeadBase):
         # Build horizon queries: learned embedding + sinusoidal position
         queries = (self.horizon_queries[:h] + self.pe[:h]).unsqueeze(0).expand(batch, -1, -1)
 
+        # Optional KV compression for memory efficiency
+        if self.kv_compress is not None:
+            h_seq_kv = self.kv_compress(h_seq)  # (batch, seq_len, kv_dim)
+        else:
+            h_seq_kv = h_seq  # (batch, seq_len, d_model)
+
         # Cross-attention layers
         for layer in self.layers:
-            attn_out, _ = layer["cross_attn"](queries, h_seq, h_seq)
+            attn_out, _ = layer["cross_attn"](queries, h_seq_kv, h_seq_kv)
             queries = layer["norm1"](queries + attn_out)
             ff_out = layer["ff"](queries)
             queries = layer["norm2"](queries + ff_out)
