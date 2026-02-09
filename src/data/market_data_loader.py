@@ -424,6 +424,7 @@ class MarketDataLoader:
     input_len: int
     pred_len: int
     batch_size: int = 64
+    stride: Optional[int] = None
     sort_on_load: bool = True
     gap_handling: str = "error"
     feature_dim: int = 3
@@ -433,7 +434,7 @@ class MarketDataLoader:
         if not self.assets_data:
             raise ValueError("Data source returned no assets")
         self._normalize_assets()
-        stride = self.input_len + self.pred_len
+        stride = self.stride if self.stride is not None else (self.input_len + self.pred_len)
         self.dataset = MarketDataset(
             self.assets_data,
             engineer=self.engineer,
