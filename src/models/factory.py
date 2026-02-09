@@ -19,7 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase
-from .heads import GBMHead, SDEHead, HeadBase
+from .heads import GBMHead, HorizonHead, NeuralBridgeHead, SDEHead, HeadBase
 from .registry import discover_components
 
 
@@ -132,6 +132,17 @@ class HybridBackbone(BackboneBase):
             h = layer(h)
         return h[:, -1]
 
+    def forward_sequence(self, x: torch.Tensor) -> torch.Tensor:
+        """Run the backbone and return the full sequence ``(batch, seq, d_model)``.
+
+        This is used by heads that need temporal context (e.g. :class:`HorizonHead`)
+        rather than the compressed last-step embedding.
+        """
+        h = self.input_proj(x)
+        for layer in self.layers:
+            h = layer(h)
+        return h
+
 
 class SynthModel(nn.Module):
     """Model wrapping a backbone and head for stochastic path generation.
@@ -159,6 +170,20 @@ class SynthModel(nn.Module):
         n_paths: int = 1000,
         dt: float = 1.0,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if isinstance(self.head, NeuralBridgeHead):
+            h_t = self.backbone(x)
+            macro_ret, micro_returns, sigma = self.head(h_t)
+            paths = simulate_bridge_paths(
+                initial_price, micro_returns, sigma, n_paths, dt,
+            )
+            return paths, macro_ret.squeeze(-1), sigma
+
+        if isinstance(self.head, HorizonHead):
+            h_seq = self.backbone.forward_sequence(x)
+            mu_seq, sigma_seq = self.head(h_seq, horizon)
+            paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
+            return paths, mu_seq, sigma_seq
+
         h_t = self.backbone(x)
         mu, sigma = self.head(h_t)
         paths = simulate_gbm_paths(initial_price, mu, sigma, horizon, n_paths, dt)
@@ -182,14 +207,97 @@ def simulate_gbm_paths(
     drift = (mu - 0.5 * sigma ** 2) * dt
     diffusion = sigma * torch.sqrt(torch.tensor(dt, device=mu.device)) * eps
     log_returns = drift + diffusion
+    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
     steps = torch.exp(log_returns)
     paths = initial_price * torch.cumprod(steps, dim=2)
+    return paths
+
+
+def simulate_horizon_paths(
+    initial_price: torch.Tensor,
+    mu_seq: torch.Tensor,
+    sigma_seq: torch.Tensor,
+    n_paths: int,
+    dt: float = 1.0,
+) -> torch.Tensor:
+    """GBM path simulation with **per-step** drift and volatility.
+
+    Unlike :func:`simulate_gbm_paths` which uses a single ``(mu, sigma)``
+    constant across all horizon steps, this variant accepts time-varying
+    parameters produced by :class:`HorizonHead`.
+
+    Parameters
+    ----------
+    initial_price : (batch,)
+    mu_seq : (batch, horizon) — drift per step
+    sigma_seq : (batch, horizon) — volatility per step
+    n_paths : number of Monte-Carlo paths
+    dt : time-step scale
+
+    Returns
+    -------
+    paths : (batch, n_paths, horizon)
+    """
+    batch, horizon = mu_seq.shape
+    device = mu_seq.device
+
+    mu = mu_seq.unsqueeze(1)         # (batch, 1, horizon)
+    sigma = sigma_seq.unsqueeze(1)   # (batch, 1, horizon)
+
+    eps = torch.randn(batch, n_paths, horizon, device=device)
+    sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
+    drift = (mu - 0.5 * sigma ** 2) * dt
+    diffusion = sigma * sqrt_dt * eps
+    log_returns = drift + diffusion
+    log_returns = torch.clamp(log_returns, min=-20.0, max=20.0)
+    steps = torch.exp(log_returns)
+
+    initial_price = initial_price.view(batch, 1, 1)
+    paths = initial_price * torch.cumprod(steps, dim=2)
+    return paths
+
+
+def simulate_bridge_paths(
+    initial_price: torch.Tensor,
+    micro_returns: torch.Tensor,
+    sigma: torch.Tensor,
+    n_paths: int,
+    dt: float = 1.0,
+) -> torch.Tensor:
+    """Monte-Carlo paths around a NeuralBridge mean trajectory.
+
+    Parameters
+    ----------
+    initial_price : (batch,)
+    micro_returns : (batch, micro_steps) — mean cumulative log-returns from the bridge head
+    sigma : (batch,) — volatility scale
+    n_paths : number of stochastic paths to generate
+    dt : time-step scale
+
+    Returns
+    -------
+    paths : (batch, n_paths, micro_steps)
+    """
+    batch, micro_steps = micro_returns.shape
+    device = micro_returns.device
+
+    mu = micro_returns.unsqueeze(1)          # (batch, 1, micro_steps)
+    s = sigma.view(batch, 1, 1)              # (batch, 1, 1)
+
+    eps = torch.randn(batch, n_paths, micro_steps, device=device)
+    sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
+    log_returns = mu + s * sqrt_dt * eps
+
+    initial_price = initial_price.view(batch, 1, 1)
+    paths = initial_price * torch.exp(log_returns)
     return paths
 
 
 HEAD_REGISTRY = {
     "gbm": GBMHead,
     "sde": SDEHead,
+    "horizon": HorizonHead,
+    "neural_bridge": NeuralBridgeHead,
 }
 
 
@@ -300,6 +408,8 @@ __all__ = [
     "HybridBackbone",
     "ParallelFusion",
     "simulate_gbm_paths",
+    "simulate_horizon_paths",
+    "simulate_bridge_paths",
     "build_model",
     "create_model",
     "get_model",

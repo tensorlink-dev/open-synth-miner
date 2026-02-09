@@ -34,6 +34,9 @@ class DataToModelAdapter:
         target = batch["target"].detach().to(self.device)
 
         history = inputs.transpose(1, 2).contiguous()
+        # Squeeze channel dimension: (batch, 1, pred_len) → (batch, pred_len)
+        if target.ndim == 3 and target.shape[1] == 1:
+            target = target.squeeze(1)
         if self.target_is_log_return:
             target_factors = torch.exp(torch.cumsum(target, dim=-1))
         else:
@@ -83,7 +86,10 @@ class Trainer:
             horizon=horizon,
             n_paths=self.n_paths,
         )
-        sim_paths = paths.transpose(1, 2)
+        if paths.ndim == 2:
+            sim_paths = paths.unsqueeze(-1)
+        else:
+            sim_paths = paths.transpose(1, 2)
         crps = crps_ensemble(sim_paths, target)
         loss = crps.mean()
         loss.backward()
@@ -121,7 +127,10 @@ class Trainer:
                 horizon=horizon,
                 n_paths=self.n_paths,
             )
-            sim_paths = paths.transpose(1, 2)
+            if paths.ndim == 2:
+                sim_paths = paths.unsqueeze(-1)
+            else:
+                sim_paths = paths.transpose(1, 2)
             crps = crps_ensemble(sim_paths, target)
 
             total_loss += crps.mean().item()
