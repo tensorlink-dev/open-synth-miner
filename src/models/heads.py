@@ -292,6 +292,11 @@ class HorizonHead(HeadBase):
     When ``use_volatility_gate=True``, gates attention by input volatility,
     emphasizing high-volatility periods (more informative for forecasting).
 
+    When ``use_cross_modal=True``, uses separate Q vs K/V projections. Forecast
+    steps (queries) learn what they *need* via W_q, while past observations (keys/values)
+    learn what they *provide* via W_k/W_v. This asymmetry is effective when future
+    dynamics differ from historical patterns (common in financial forecasting).
+
     Parameters
     ----------
     latent_size:
@@ -317,6 +322,10 @@ class HorizonHead(HeadBase):
     use_volatility_gate:
         If True, gate attention by input volatility (requires computing volatility
         from input sequence). High-volatility periods weighted higher. Default False.
+    use_cross_modal:
+        If True, use separate W_q (for forecast steps) and W_k/W_v (for past).
+        Enables asymmetric attention where queries and keys are projected differently.
+        Useful when future dynamics differ from historical patterns. Default False.
     """
 
     def __init__(
@@ -330,6 +339,7 @@ class HorizonHead(HeadBase):
         kv_dim: int | None = None,
         temporal_bias: bool = False,
         use_volatility_gate: bool = False,
+        use_cross_modal: bool = False,
     ) -> None:
         super().__init__()
         self.latent_size = latent_size
@@ -337,6 +347,7 @@ class HorizonHead(HeadBase):
         self.kv_dim = kv_dim
         self.temporal_bias = temporal_bias
         self.use_volatility_gate = use_volatility_gate
+        self.use_cross_modal = use_cross_modal
         d_ff = d_ff or latent_size * 2
 
         # Optional KV compression for memory efficiency
@@ -357,6 +368,13 @@ class HorizonHead(HeadBase):
             # Gate function: volatility scalar -> per-head bias
             self.volatility_gate = nn.Linear(1, nhead)
 
+        # Optional cross-modal attention (separate Q vs K/V projections)
+        if use_cross_modal:
+            self.cross_modal_q_proj = nn.Linear(latent_size, latent_size)
+            self.cross_modal_k_proj = nn.Linear(kv_dim if kv_dim is not None else latent_size, latent_size)
+            self.cross_modal_v_proj = nn.Linear(kv_dim if kv_dim is not None else latent_size, latent_size)
+            self.cross_modal_out_proj = nn.Linear(latent_size, latent_size)
+
         # Learned horizon query embeddings
         self.horizon_queries = nn.Parameter(
             torch.randn(horizon_max, latent_size) * 0.02
@@ -376,27 +394,32 @@ class HorizonHead(HeadBase):
         # Cross-attention decoder layers
         self.layers = nn.ModuleList()
         for _ in range(n_layers):
-            self.layers.append(
-                nn.ModuleDict(
-                    {
-                        "cross_attn": nn.MultiheadAttention(
-                            latent_size, nhead, dropout=dropout, batch_first=True,
-                            kdim=kv_dim, vdim=kv_dim,
-                        ) if kv_dim is not None else nn.MultiheadAttention(
-                            latent_size, nhead, dropout=dropout, batch_first=True,
-                        ),
-                        "norm1": nn.LayerNorm(latent_size),
-                        "ff": nn.Sequential(
-                            nn.Linear(latent_size, d_ff),
-                            nn.GELU(),
-                            nn.Dropout(dropout),
-                            nn.Linear(d_ff, latent_size),
-                            nn.Dropout(dropout),
-                        ),
-                        "norm2": nn.LayerNorm(latent_size),
-                    }
+            layer_dict = {}
+
+            # Use cross-modal custom attention or standard MultiheadAttention
+            if use_cross_modal:
+                layer_dict["cross_attn"] = None  # Will use custom projections
+            else:
+                layer_dict["cross_attn"] = nn.MultiheadAttention(
+                    latent_size, nhead, dropout=dropout, batch_first=True,
+                    kdim=kv_dim, vdim=kv_dim,
+                ) if kv_dim is not None else nn.MultiheadAttention(
+                    latent_size, nhead, dropout=dropout, batch_first=True,
                 )
-            )
+
+            layer_dict.update({
+                "norm1": nn.LayerNorm(latent_size),
+                "ff": nn.Sequential(
+                    nn.Linear(latent_size, d_ff),
+                    nn.GELU(),
+                    nn.Dropout(dropout),
+                    nn.Linear(d_ff, latent_size),
+                    nn.Dropout(dropout),
+                ),
+                "norm2": nn.LayerNorm(latent_size),
+            })
+
+            self.layers.append(nn.ModuleDict(layer_dict))
 
         # Per-step projection to (mu_t, sigma_t)
         self.mu_proj = nn.Linear(latent_size, 1)
@@ -439,7 +462,21 @@ class HorizonHead(HeadBase):
 
         # Cross-attention layers
         for layer in self.layers:
-            attn_out, _ = layer["cross_attn"](queries, h_seq_kv, h_seq_kv)
+            # Compute attention (standard or cross-modal)
+            if self.use_cross_modal:
+                # Custom cross-modal attention with separate Q vs K/V projections
+                Q = self.cross_modal_q_proj(queries)  # (batch, h, latent_size)
+                K = self.cross_modal_k_proj(h_seq_kv)  # (batch, seq_len, latent_size)
+                V = self.cross_modal_v_proj(h_seq_kv)  # (batch, seq_len, latent_size)
+
+                # Compute attention scores
+                scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.latent_size)  # (batch, h, seq_len)
+                attn_weights = F.softmax(scores, dim=-1)
+                attn_out = torch.matmul(attn_weights, V)  # (batch, h, latent_size)
+                attn_out = self.cross_modal_out_proj(attn_out)
+            else:
+                # Standard MultiheadAttention
+                attn_out, _ = layer["cross_attn"](queries, h_seq_kv, h_seq_kv)
 
             # Apply temporal relative position bias (per-query decay weighting)
             if self.temporal_bias:
