@@ -9,7 +9,12 @@ optimize:
   assets: ${data.assets}
 
   engineer:
-    type: wavelet
+    type: wavelet        # shorthand for src.data.market_data_loader.WaveletEngineer
     search_space:
-      level: [2, 6]
-      wavelet: ["db2", "db4", "db6", "db8", "sym4", "sym6"]
+      level:
+        type: int
+        low: 2
+        high: 6
+      wavelet:
+        type: categorical
+        choices: ["db2", "db4", "db6", "db8", "sym4", "sym6"]

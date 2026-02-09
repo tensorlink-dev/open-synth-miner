@@ -5,17 +5,42 @@ candidates by measuring the intrinsic dimensionality of the resulting
 feature space.  Lower intrinsic dimension signals a more compact,
 higher-density representation which empirically leads to better
 downstream model performance.
+
+Custom engineers
+~~~~~~~~~~~~~~~~
+Any ``FeatureEngineer`` subclass can be optimized by specifying it as a
+Hydra ``_target_`` in the optimize config::
+
+    optimize:
+      engineer:
+        _target_: my_package.MyEngineer
+        search_space:
+          window:
+            type: int
+            low: 5
+            high: 100
+          alpha:
+            type: float
+            low: 0.01
+            high: 1.0
+          mode:
+            type: categorical
+            choices: [fast, precise]
+
+The built-in shorthands ``type: zscore`` and ``type: wavelet`` still work
+for backward compatibility.
 """
 from __future__ import annotations
 
+import importlib
 import logging
-from typing import Any, Dict, List, Type
+from typing import Any, Dict, List
 
 import hydra
 import numpy as np
 import optuna
 import skdim
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from sklearn.preprocessing import StandardScaler
 
 from src.data.market_data_loader import (
@@ -28,11 +53,38 @@ from src.data.market_data_loader import (
 
 log = logging.getLogger(__name__)
 
-# Registry mapping engineer type keys to their class and default feature dims
-_ENGINEER_REGISTRY: Dict[str, Type[FeatureEngineer]] = {
-    "zscore": ZScoreEngineer,
-    "wavelet": WaveletEngineer,
+# Shorthand aliases so users can write  type: zscore  instead of a full _target_
+_SHORTHAND_TARGETS: Dict[str, str] = {
+    "zscore": "src.data.market_data_loader.ZScoreEngineer",
+    "wavelet": "src.data.market_data_loader.WaveletEngineer",
 }
+
+
+def _import_target(target: str) -> type:
+    """Import a class from a dotted ``module.ClassName`` path."""
+    module_path, _, class_name = target.rpartition(".")
+    if not module_path:
+        raise ImportError(f"Invalid _target_: '{target}' (expected module.ClassName)")
+    module = importlib.import_module(module_path)
+    return getattr(module, class_name)
+
+
+def _suggest_param(trial: optuna.Trial, name: str, spec: DictConfig) -> Any:
+    """Suggest a single parameter from its search-space spec."""
+    ptype = str(spec["type"])
+
+    if ptype == "int":
+        return trial.suggest_int(name, int(spec.low), int(spec.high))
+    if ptype == "float":
+        log_scale = bool(spec.get("log", False))
+        return trial.suggest_float(name, float(spec.low), float(spec.high), log=log_scale)
+    if ptype == "categorical":
+        return trial.suggest_categorical(name, list(spec.choices))
+
+    raise ValueError(
+        f"Unknown search_space type '{ptype}' for param '{name}'. "
+        "Supported: int, float, categorical"
+    )
 
 
 class FeatureOptimizer:
@@ -49,7 +101,8 @@ class FeatureOptimizer:
     ----------
     cfg : DictConfig
         Full Hydra config.  The ``optimize`` sub-key must contain at least
-        ``n_trials``, ``engineer.type``, and ``engineer.search_space``.
+        ``n_trials`` and an ``engineer`` block with either a ``_target_`` or
+        a legacy ``type`` shorthand, plus a ``search_space`` mapping.
     """
 
     def __init__(self, cfg: DictConfig) -> None:
@@ -59,14 +112,35 @@ class FeatureOptimizer:
         self.n_trials: int = opt.n_trials
         self.input_len: int = opt.get("input_len", 96)
         self.n_samples: int = opt.get("n_samples", 500)
-        self.engineer_type: str = opt.engineer.type
-        self.search_space: DictConfig = opt.engineer.search_space
 
-        if self.engineer_type not in _ENGINEER_REGISTRY:
+        eng_cfg = opt.engineer
+        self.search_space: DictConfig = eng_cfg.search_space
+
+        # Resolve engineer class: _target_ takes precedence, then type shorthand.
+        if "_target_" in eng_cfg:
+            target_str = str(eng_cfg._target_)
+        elif "type" in eng_cfg:
+            shorthand = str(eng_cfg.type)
+            target_str = _SHORTHAND_TARGETS.get(shorthand)
+            if target_str is None:
+                raise ValueError(
+                    f"Unknown engineer shorthand '{shorthand}'. "
+                    f"Available shorthands: {sorted(_SHORTHAND_TARGETS)}. "
+                    "Or use _target_ to specify any FeatureEngineer class."
+                )
+        else:
             raise ValueError(
-                f"Unknown engineer type '{self.engineer_type}'. "
-                f"Available: {sorted(_ENGINEER_REGISTRY)}"
+                "optimize.engineer must specify either '_target_' (dotted class path) "
+                "or 'type' (shorthand: zscore, wavelet)"
             )
+
+        self.engineer_cls: type = _import_target(target_str)
+        if not (isinstance(self.engineer_cls, type) and issubclass(self.engineer_cls, FeatureEngineer)):
+            raise TypeError(
+                f"{target_str} does not resolve to a FeatureEngineer subclass"
+            )
+        self.engineer_target: str = target_str
+        log.info("Engineer class: %s", self.engineer_target)
 
         # Load asset data once — reused across all trials.
         assets: List[str] = list(opt.get("assets", cfg.data.assets))
@@ -81,34 +155,22 @@ class FeatureOptimizer:
         )
 
     # ------------------------------------------------------------------
-    # Engineer construction helpers
+    # Engineer construction
     # ------------------------------------------------------------------
 
     def _build_engineer(self, trial: optuna.Trial) -> FeatureEngineer:
         """Instantiate a ``FeatureEngineer`` with trial-suggested params."""
 
-        space = self.search_space
+        kwargs: Dict[str, Any] = {}
+        for name, spec in self.search_space.items():
+            kwargs[name] = _suggest_param(trial, name, spec)
 
-        if self.engineer_type == "zscore":
-            short_win = trial.suggest_int(
-                "short_win", int(space.short_win[0]), int(space.short_win[1])
-            )
-            long_win = trial.suggest_int(
-                "long_win", int(space.long_win[0]), int(space.long_win[1])
-            )
-            # Ensure long > short to produce meaningful z-scores.
-            if long_win <= short_win:
-                long_win = short_win + 1
-            return ZScoreEngineer(short_win=short_win, long_win=long_win)
+        # Apply any static (non-searched) params from config.
+        static = self.cfg.optimize.engineer.get("static_params", {})
+        if static:
+            kwargs.update(OmegaConf.to_container(static, resolve=True))
 
-        if self.engineer_type == "wavelet":
-            level = trial.suggest_int(
-                "level", int(space.level[0]), int(space.level[1])
-            )
-            wavelet = trial.suggest_categorical("wavelet", list(space.wavelet))
-            return WaveletEngineer(wavelet=wavelet, level=level)
-
-        raise ValueError(f"Unsupported engineer type: {self.engineer_type}")
+        return self.engineer_cls(**kwargs)
 
     # ------------------------------------------------------------------
     # Feature extraction

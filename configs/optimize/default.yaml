@@ -3,6 +3,10 @@
 #
 # Override from the CLI:
 #   python main.py mode=optimize optimize.n_trials=100 optimize.assets='[BTC,ETH]'
+#
+# Custom engineers:
+#   Use _target_ instead of type to point at any FeatureEngineer subclass.
+#   See configs/optimize/custom.yaml for an example.
 
 optimize:
   n_trials: 50
@@ -12,8 +16,13 @@ optimize:
   assets: ${data.assets} # defaults to whatever data.assets provides
 
   engineer:
-    type: zscore         # zscore | wavelet
+    type: zscore         # shorthand for src.data.market_data_loader.ZScoreEngineer
     search_space:
-      # ZScore search ranges
-      short_win: [5, 50]
-      long_win: [50, 500]
+      short_win:
+        type: int
+        low: 5
+        high: 50
+      long_win:
+        type: int
+        low: 50
+        high: 500
