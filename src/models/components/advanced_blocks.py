@@ -545,6 +545,173 @@ class TimesNetBlock(nn.Module):
         return self.norm(x + self.dropout(accumulated))
 
 
+# ---------------------------------------------------------------------------
+# TimeMixer (multi-scale past-decomposable mixing)
+# ---------------------------------------------------------------------------
+
+
+class _MovingAvgDecomp(nn.Module):
+    """Moving-average series decomposition into trend + seasonal."""
+
+    def __init__(self, kernel_size: int = 25) -> None:
+        super().__init__()
+        padding = (kernel_size - 1) // 2
+        self.avg = nn.AvgPool1d(kernel_size=kernel_size, stride=1, padding=padding)
+
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        # x: (batch, seq_len, d_model)
+        x_t = x.transpose(1, 2)  # (batch, d_model, seq_len)
+        trend = self.avg(x_t).transpose(1, 2)
+        if trend.shape[1] != x.shape[1]:
+            trend = F.interpolate(
+                trend.transpose(1, 2), size=x.shape[1], mode="linear", align_corners=False
+            ).transpose(1, 2)
+        seasonal = x - trend
+        return seasonal, trend
+
+
+class _MultiScaleSeasonMixing(nn.Module):
+    """Bottom-up mixing: aggregate fine-scale seasonal patterns into coarser scales."""
+
+    def __init__(self, d_model: int, n_scales: int, d_ff: int) -> None:
+        super().__init__()
+        self.mixing_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.GELU(),
+                nn.Linear(d_ff, d_model),
+            )
+            for _ in range(max(n_scales - 1, 1))
+        ])
+
+    def forward(self, season_list: List[torch.Tensor]) -> List[torch.Tensor]:
+        if len(season_list) == 1:
+            return [self.mixing_layers[0](season_list[0])]
+
+        out_list = [season_list[0]]
+        for i in range(len(season_list) - 1):
+            high = out_list[-1]
+            low = season_list[i + 1]
+            # Downsample high to match low's temporal resolution, then mix
+            high_down = F.interpolate(
+                high.transpose(1, 2), size=low.shape[1], mode="linear", align_corners=False
+            ).transpose(1, 2)
+            mixed = low + self.mixing_layers[i](high_down)
+            out_list.append(mixed)
+        return out_list
+
+
+class _MultiScaleTrendMixing(nn.Module):
+    """Top-down mixing: propagate coarse-scale trend patterns to finer scales."""
+
+    def __init__(self, d_model: int, n_scales: int, d_ff: int) -> None:
+        super().__init__()
+        self.mixing_layers = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(d_model, d_ff),
+                nn.GELU(),
+                nn.Linear(d_ff, d_model),
+            )
+            for _ in range(max(n_scales - 1, 1))
+        ])
+
+    def forward(self, trend_list: List[torch.Tensor]) -> List[torch.Tensor]:
+        if len(trend_list) == 1:
+            return [self.mixing_layers[0](trend_list[0])]
+
+        rev = list(reversed(trend_list))
+        out_list = [rev[0]]
+        for i in range(len(rev) - 1):
+            low = out_list[-1]
+            high = rev[i + 1]
+            # Upsample coarse to match finer temporal resolution, then mix
+            low_up = F.interpolate(
+                low.transpose(1, 2), size=high.shape[1], mode="linear", align_corners=False
+            ).transpose(1, 2)
+            mixed = high + self.mixing_layers[i](low_up)
+            out_list.append(mixed)
+        out_list.reverse()
+        return out_list
+
+
+@registry.register_block("timemixerblock")
+class TimeMixerBlock(nn.Module):
+    """Past-Decomposable-Mixing block from TimeMixer (ICLR 2024).
+
+    Decomposes input into trend and seasonal components, creates a multi-scale
+    representation via average-pooling downsampling, applies bottom-up seasonal
+    mixing and top-down trend mixing across scales, then recombines at the
+    original resolution with a residual connection.
+
+    Based on "TimeMixer: Decomposable Multiscale Mixing for Time Series
+    Forecasting" (Wang et al., 2024).
+    Preserves the ``(batch, seq, d_model)`` shape contract.
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        d_ff: int | None = None,
+        down_sampling_window: int = 2,
+        down_sampling_layers: int = 2,
+        moving_avg_kernel: int = 25,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        d_ff = d_ff or d_model * 2
+        self.down_sampling_window = down_sampling_window
+        self.down_sampling_layers = down_sampling_layers
+        n_scales = down_sampling_layers + 1
+
+        self.decomposition = _MovingAvgDecomp(kernel_size=moving_avg_kernel)
+        self.season_mixing = _MultiScaleSeasonMixing(d_model, n_scales, d_ff)
+        self.trend_mixing = _MultiScaleTrendMixing(d_model, n_scales, d_ff)
+
+        self.out_proj = nn.Sequential(
+            nn.Linear(d_model, d_ff),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_ff, d_model),
+        )
+        self.norm = nn.LayerNorm(d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def _build_multi_scale(self, x: torch.Tensor) -> List[torch.Tensor]:
+        """Downsample input to create multi-scale representations."""
+        scales = [x]
+        current = x
+        for _ in range(self.down_sampling_layers):
+            # AvgPool1d along temporal dimension
+            ct = current.transpose(1, 2)  # (batch, d_model, seq)
+            if ct.shape[2] < self.down_sampling_window:
+                break
+            pooled = F.avg_pool1d(ct, kernel_size=self.down_sampling_window, stride=self.down_sampling_window)
+            current = pooled.transpose(1, 2)
+            scales.append(current)
+        return scales
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 1. Build multi-scale representations
+        x_scales = self._build_multi_scale(x)
+
+        # 2. Decompose each scale into seasonal + trend
+        season_list = []
+        trend_list = []
+        for xs in x_scales:
+            seasonal, trend = self.decomposition(xs)
+            season_list.append(seasonal)
+            trend_list.append(trend)
+
+        # 3. Mix across scales
+        mixed_season = self.season_mixing(season_list)
+        mixed_trend = self.trend_mixing(trend_list)
+
+        # 4. Recombine at original resolution (scale 0) and apply residual
+        combined = mixed_season[0] + mixed_trend[0]
+        out = self.out_proj(self.dropout(combined))
+        return self.norm(x + out)
+
+
 @registry.register_block("patchmixerblock")
 class PatchMixerBlock(nn.Module):
     """MLP-Mixer style block for patched time series."""
