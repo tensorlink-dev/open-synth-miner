@@ -34,6 +34,9 @@ class DataToModelAdapter:
         target = batch["target"].detach().to(self.device)
 
         history = inputs.transpose(1, 2).contiguous()
+        # Squeeze channel dimension: (batch, 1, pred_len) → (batch, pred_len)
+        if target.ndim == 3 and target.shape[1] == 1:
+            target = target.squeeze(1)
         if self.target_is_log_return:
             target_factors = torch.exp(torch.cumsum(target, dim=-1))
         else:
