@@ -226,12 +226,32 @@ class SynthModel(nn.Module):
       engineering output of the data loader.
     * ``initial_price``: scalar per batch element representing the current
       price level that anchors generated paths.
+
+    RevIN Denormalization
+    ---------------------
+    If the backbone contains RevIN layers, they normalize the input features.
+    During inference, the model can optionally denormalize the outputs by
+    setting ``apply_revin_denorm=True``. This adjusts the predicted drift (mu)
+    and volatility (sigma) to account for the input normalization, ensuring
+    paths are in the correct scale.
     """
 
     def __init__(self, backbone: BackboneBase, head: HeadBase):
         super().__init__()
         self.backbone = backbone
         self.head = head
+        self._revin_layers = self._collect_revin_layers()
+
+    def _collect_revin_layers(self) -> List[nn.Module]:
+        """Collect all RevIN layers from the backbone for denormalization."""
+        from .components.advanced_blocks import RevIN
+
+        revin_layers = []
+        if hasattr(self.backbone, "layers"):
+            for layer in self.backbone.layers:
+                if isinstance(layer, RevIN):
+                    revin_layers.append(layer)
+        return revin_layers
 
     def forward(
         self,
@@ -240,30 +260,103 @@ class SynthModel(nn.Module):
         horizon: int,
         n_paths: int = 1000,
         dt: float = 1.0,
+        apply_revin_denorm: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Run backbone - this may normalize via RevIN layers
         if isinstance(self.head, NeuralSDEHead):
             h_t = self.backbone(x)
             paths, mu, sigma = self.head(h_t, initial_price, horizon, n_paths, dt)
-            return paths, mu, sigma
-
-        if isinstance(self.head, NeuralBridgeHead):
+        elif isinstance(self.head, NeuralBridgeHead):
             h_t = self.backbone(x)
             macro_ret, micro_returns, sigma = self.head(h_t)
+            # Apply denormalization to micro_returns and sigma if RevIN was used
+            if apply_revin_denorm and self._revin_layers:
+                micro_returns, sigma = self._denormalize_outputs(micro_returns, sigma)
             paths = simulate_bridge_paths(
                 initial_price, micro_returns, sigma, n_paths, dt,
             )
             return paths, macro_ret.squeeze(-1), sigma
-
-        if isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
+        elif isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
+            # Apply denormalization to mu_seq and sigma_seq if RevIN was used
+            if apply_revin_denorm and self._revin_layers:
+                mu_seq, sigma_seq = self._denormalize_outputs(mu_seq, sigma_seq)
             paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
             return paths, mu_seq, sigma_seq
+        else:
+            h_t = self.backbone(x)
+            mu, sigma = self.head(h_t)
+            # Apply denormalization to mu and sigma if RevIN was used
+            if apply_revin_denorm and self._revin_layers:
+                mu, sigma = self._denormalize_outputs(mu, sigma)
+            paths = simulate_gbm_paths(initial_price, mu, sigma, horizon, n_paths, dt)
+            return paths, mu, sigma
 
-        h_t = self.backbone(x)
-        mu, sigma = self.head(h_t)
-        paths = simulate_gbm_paths(initial_price, mu, sigma, horizon, n_paths, dt)
+        # For NeuralSDEHead, paths are generated inside the head, so we denormalize differently
+        if isinstance(self.head, NeuralSDEHead) and apply_revin_denorm and self._revin_layers:
+            paths = self._denormalize_paths(paths, initial_price)
         return paths, mu, sigma
+
+    def _denormalize_outputs(
+        self, mu: torch.Tensor, sigma: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Denormalize drift and volatility using RevIN statistics.
+
+        When RevIN normalizes the input by dividing by std, the model learns
+        drift and volatility in normalized space. To get predictions in the
+        original scale, we need to scale them back:
+        - sigma_denorm = sigma * std (volatility scales with std)
+        - mu_denorm = mu * std (drift also scales with std)
+
+        We use the std from the first RevIN layer (if multiple exist).
+        """
+        if not self._revin_layers:
+            return mu, sigma
+
+        # Use the first RevIN layer's statistics
+        revin = self._revin_layers[0]
+        stdev = revin.stdev  # Shape: (batch, 1, d_model) or (1, 1, d_model)
+
+        # Compute average std across features as a scalar per batch
+        # This gives us a scale factor for denormalization
+        scale = stdev.mean(dim=-1).squeeze(-1)  # Shape: (batch,) or scalar
+
+        # Ensure scale is broadcastable
+        if scale.ndim == 0:  # scalar
+            scale = scale.item()
+        elif scale.ndim == 1:  # (batch,)
+            scale = scale.view(-1, 1) if mu.ndim == 2 else scale
+
+        # Scale drift and volatility back to original space
+        mu_denorm = mu * scale
+        sigma_denorm = sigma * scale
+
+        return mu_denorm, sigma_denorm
+
+    def _denormalize_paths(
+        self, paths: torch.Tensor, initial_price: torch.Tensor
+    ) -> torch.Tensor:
+        """Denormalize paths for NeuralSDEHead (which generates paths internally).
+
+        For NeuralSDEHead, paths are generated inside the head using internal
+        SDE integration. We denormalize by scaling the log-returns.
+        """
+        if not self._revin_layers:
+            return paths
+
+        # Use the first RevIN layer's statistics
+        revin = self._revin_layers[0]
+        stdev = revin.stdev
+        scale = stdev.mean(dim=-1).squeeze(-1)
+
+        # Convert paths to log-returns, scale, and convert back
+        # paths shape: (batch, n_paths, horizon)
+        log_returns = torch.log(paths / initial_price.view(-1, 1, 1))
+        log_returns_scaled = log_returns * scale.view(-1, 1, 1)
+        paths_denorm = initial_price.view(-1, 1, 1) * torch.exp(log_returns_scaled)
+
+        return paths_denorm
 
 
 def simulate_gbm_paths(
