@@ -18,6 +18,7 @@ from src.models.factory import (
 from src.models.registry import discover_components, registry
 from src.data import MarketDataLoader
 from src.research.experiment_mgr import run_experiment
+from src.research.agent_api import ResearchSession, quick_experiment
 
 __all__ = [
     "SynthModel",
@@ -31,4 +32,6 @@ __all__ = [
     "registry",
     "MarketDataLoader",
     "run_experiment",
+    "ResearchSession",
+    "quick_experiment",
 ]
