@@ -18,7 +18,7 @@ from huggingface_hub import snapshot_download
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from .backbones import BackboneBase
+from .backbones import BackboneBase, BlockBase
 from .heads import GBMHead, HorizonHead, SimpleHorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
 from .registry import discover_components
 
@@ -44,10 +44,30 @@ class ParallelFusion(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         outputs = [path(x) for path in self.paths]
         if self.merge_strategy == "concat":
+            # For concat, all dims except the last must match.
+            ref = outputs[0].shape[:-1]
+            for i, out in enumerate(outputs[1:], 1):
+                if out.shape[:-1] != ref:
+                    raise ValueError(
+                        f"ParallelFusion concat: path 0 has shape {tuple(outputs[0].shape)} "
+                        f"but path {i} has shape {tuple(out.shape)}. "
+                        f"All dimensions except the last must match for concatenation."
+                    )
             return torch.cat(outputs, dim=-1)
+        # Gating: all shapes must be identical.
+        ref = outputs[0].shape
+        for i, out in enumerate(outputs[1:], 1):
+            if out.shape != ref:
+                raise ValueError(
+                    f"ParallelFusion gating: path 0 has shape {tuple(outputs[0].shape)} "
+                    f"but path {i} has shape {tuple(out.shape)}. "
+                    f"All parallel paths must return identical shapes for gating."
+                )
         weights = torch.softmax(self.gate, dim=0)
         stacked = torch.stack(outputs, dim=0)
-        gated = (weights.view(-1, 1, 1, 1) * stacked).sum(dim=0)
+        # Reshape weights to broadcast: (num_paths, 1, 1, ...) matching output ndim
+        weight_shape = [-1] + [1] * outputs[0].ndim
+        gated = (weights.view(*weight_shape) * stacked).sum(dim=0)
         return gated
 
 
@@ -135,7 +155,12 @@ class HybridBackbone(BackboneBase):
         return out.shape[-1]
 
     def validate_shapes(self, strict_shapes: bool = True) -> None:
-        """Ensure blocks preserve (batch, seq, d_model) shape contract."""
+        """Ensure blocks preserve (batch, seq, d_model) shape contract.
+
+        When blocks subclass :class:`BlockBase`, their ``min_seq_len``
+        attribute is checked *before* the forward pass so that failures
+        produce actionable messages instead of cryptic reshape errors.
+        """
 
         batch, seq = 2, 3
         expected = (batch, seq, self.d_model)
@@ -148,6 +173,14 @@ class HybridBackbone(BackboneBase):
                 )
 
             for idx, layer in enumerate(self.layers):
+                # Pre-check BlockBase metadata for early, clear errors.
+                if isinstance(layer, BlockBase) and seq < layer.min_seq_len:
+                    raise ValueError(
+                        f"HybridBackbone block {idx} ({layer.__class__.__name__}) "
+                        f"requires min_seq_len={layer.min_seq_len} but the "
+                        f"validation probe uses seq_len={seq}. This block is "
+                        f"incompatible with very short sequences."
+                    )
                 h_new = layer(h)
                 if h_new.shape != expected:
                     message = (
@@ -403,12 +436,50 @@ def build_model(model_cfg: Dict | DictConfig) -> SynthModel:
     head_cfg_resolved = head_cfg
     if isinstance(head_cfg, dict) and "latent_size" not in head_cfg:
         head_cfg_resolved = {**head_cfg, "latent_size": latent_size}
+    elif isinstance(head_cfg, dict) and head_cfg.get("latent_size") is not None:
+        declared = head_cfg["latent_size"]
+        if declared != latent_size:
+            raise ValueError(
+                f"Head latent_size ({declared}) does not match backbone output_dim "
+                f"({latent_size}). Either remove latent_size from the head config to "
+                f"auto-inject it, or set it to {latent_size}."
+            )
 
     head = _maybe_instantiate(head_cfg_resolved)
     if not isinstance(head, HeadBase):
         head = instantiate(OmegaConf.create(head_cfg_resolved))
 
     return SynthModel(backbone=backbone, head=head)
+
+
+def _smoke_test_model(model: SynthModel, input_size: int, seq_len: int = 8) -> None:
+    """Run a tiny forward pass to surface shape errors at construction time.
+
+    This catches feature_dim/input_size mismatches, latent_size/d_model
+    inconsistencies, head routing bugs, and broken block contracts — all
+    before any real data reaches the model.
+    """
+    batch, n_paths, horizon = 2, 2, 4
+    x = torch.zeros(batch, seq_len, input_size)
+    price = torch.ones(batch)
+    try:
+        with torch.no_grad():
+            paths, mu, sigma = model(x, price, horizon=horizon, n_paths=n_paths)
+        if paths.ndim != 3:
+            raise ValueError(
+                f"Model output should be 3D (batch, n_paths, horizon) but got "
+                f"{paths.ndim}D tensor with shape {tuple(paths.shape)}."
+            )
+        if paths.shape[0] != batch or paths.shape[1] != n_paths:
+            raise ValueError(
+                f"Model output shape {tuple(paths.shape)} does not match expected "
+                f"({batch}, {n_paths}, horizon)."
+            )
+    except Exception as e:
+        raise ValueError(
+            f"Model shape smoke test failed — check that your config dimensions "
+            f"are consistent (input_size, d_model, latent_size, horizon_max): {e}"
+        ) from e
 
 
 def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
@@ -429,15 +500,21 @@ def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
         model_cfg = {"_target_": "src.models.factory.SynthModel", **model_cfg}
 
     if isinstance(model_cfg, (DictConfig, dict)) and "_target_" in model_cfg:
-        return instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
+        model = instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
+    else:
+        model = build_model(model_cfg)
+        if isinstance(model, (DictConfig, dict)):
+            raise TypeError(
+                "create_model returned a configuration instead of a module. "
+                "Include `_target_: src.models.factory.SynthModel` in your model config "
+                "or pass an already-instantiated SynthModel."
+            )
 
-    model = build_model(model_cfg)
-    if isinstance(model, (DictConfig, dict)):
-        raise TypeError(
-            "create_model returned a configuration instead of a module. "
-            "Include `_target_: src.models.factory.SynthModel` in your model config "
-            "or pass an already-instantiated SynthModel."
-        )
+    # Smoke-test: catch shape mismatches before any real data.
+    input_size = getattr(model.backbone, "input_size", None)
+    if input_size is not None:
+        _smoke_test_model(model, input_size)
+
     return model
 
 
@@ -474,4 +551,5 @@ __all__ = [
     "build_model",
     "create_model",
     "get_model",
+    "_smoke_test_model",
 ]

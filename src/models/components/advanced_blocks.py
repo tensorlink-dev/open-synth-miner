@@ -1,6 +1,7 @@
 """Advanced blocks for recurrent, convolutional, frequency, and U-Net structures."""
 from __future__ import annotations
 
+import logging
 from typing import List, Tuple
 
 import torch
@@ -8,6 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.models.registry import registry
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -108,7 +111,7 @@ class BiTCNBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("patchembedding")
+@registry.register_block("patchembedding", preserves_seq_len=False)
 class PatchEmbedding(nn.Module):
     """Projects raw input sequence into ``d_model`` using strided convolutions."""
 
@@ -204,6 +207,14 @@ class FourierBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
+        max_fft_bins = seq_len // 2 + 1
+        if self.modes > max_fft_bins:
+            logger.warning(
+                "FourierBlock: modes=%d exceeds available FFT bins=%d for "
+                "seq_len=%d. Only %d modes will be used. Consider reducing "
+                "modes or increasing seq_len.",
+                self.modes, max_fft_bins, seq_len, max_fft_bins,
+            )
         x_in = x.permute(0, 2, 1)
 
         x_fft = torch.fft.rfft(x_in, dim=-1, norm="ortho")
@@ -272,7 +283,7 @@ class RevIN(nn.Module):
         raise ValueError(f"Unknown RevIN mode: {mode}")
 
 
-@registry.register_block("flexiblepatchembed")
+@registry.register_block("flexiblepatchembed", preserves_seq_len=False)
 class FlexiblePatchEmbed(nn.Module):
     """Patch embedding supporting channel-independence and masking."""
 
@@ -308,8 +319,11 @@ class FlexiblePatchEmbed(nn.Module):
             x = x.permute(0, 2, 1).reshape(batch * channels, seq_len, 1)
         else:
             if channels != self.input_dim and self.input_dim != 1:
-                # fall back to passthrough if misconfigured
-                return x
+                raise ValueError(
+                    f"FlexiblePatchEmbed: input has {channels} channels but was "
+                    f"configured with in_channels={self.input_dim}. Either set "
+                    f"in_channels={channels} or enable channel_independence=True."
+                )
 
         pad_len = 0
         if self.stride > 0:
@@ -372,7 +386,7 @@ class ChannelRejoin(nn.Module):
         return x
 
 
-@registry.register_block("multiscalepatcher")
+@registry.register_block("multiscalepatcher", preserves_seq_len=False)
 class MultiScalePatcher(nn.Module):
     """Apply multiple patch sizes in parallel and fuse them."""
 
@@ -511,7 +525,7 @@ class _InceptionBlock2D(nn.Module):
         return self.norm(b1 + b3 + b5)
 
 
-@registry.register_block("timesnetblock")
+@registry.register_block("timesnetblock", min_seq_len=4)
 class TimesNetBlock(nn.Module):
     """TimesNet block: discovers dominant periods via FFT, reshapes into 2D, and applies Inception convolutions.
 
@@ -545,6 +559,12 @@ class TimesNetBlock(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         batch, seq_len, d_model = x.shape
+        if seq_len < 4:
+            raise ValueError(
+                f"TimesNetBlock requires seq_len >= 4 for period discovery, "
+                f"but got seq_len={seq_len}. Use a longer context window or "
+                f"a different block for very short sequences."
+            )
         periods, weights = self._period_discovery(x)
 
         accumulated = torch.zeros_like(x)

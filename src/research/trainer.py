@@ -52,6 +52,17 @@ class DataToModelAdapter:
         inputs = batch["inputs"].to(self.device)
         target = batch["target"].detach().to(self.device)
 
+        if inputs.ndim != 3:
+            raise ValueError(
+                f"DataToModelAdapter expects inputs shaped (batch, features, time) "
+                f"but got {inputs.ndim}D tensor with shape {tuple(inputs.shape)}."
+            )
+        if inputs.shape[0] != target.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch: inputs batch={inputs.shape[0]}, "
+                f"target batch={target.shape[0]}."
+            )
+
         history = inputs.transpose(1, 2).contiguous()
         # Squeeze channel dimension: (batch, 1, pred_len) → (batch, pred_len)
         if target.ndim == 3 and target.shape[1] == 1:
