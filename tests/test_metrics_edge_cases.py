@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from src.research.metrics import (
+    afcrps_ensemble,
     calculate_crps_for_paths,
     calculate_price_changes_over_intervals,
     crps_ensemble,
@@ -349,6 +350,127 @@ class TestAdaptiveIntervals:
 
         # Cannot compute meaningful intervals with single step
         assert len(intervals) == 0, "Should return empty dict for single-step horizon"
+
+
+class TestAlmostFairCRPS:
+    """Tests for the almost-fair CRPS (Lang et al. 2024)."""
+
+    def test_alpha_zero_equals_standard_crps(self):
+        """afCRPS with alpha=0 should equal the standard CRPS."""
+        torch.manual_seed(42)
+        simulations = torch.randn(4, 10, 50) + 100.0
+        target = torch.randn(4, 10) + 100.0
+
+        standard = crps_ensemble(simulations, target)
+        af_zero = afcrps_ensemble(simulations, target, alpha=0.0)
+
+        assert torch.allclose(standard, af_zero, atol=1e-5), (
+            f"afCRPS(alpha=0) should equal standard CRPS, max diff={torch.abs(standard - af_zero).max()}"
+        )
+
+    def test_alpha_one_is_fair_crps(self):
+        """afCRPS with alpha=1 should equal the fair CRPS (larger spread penalty)."""
+        torch.manual_seed(42)
+        simulations = torch.randn(4, 10, 50) + 100.0
+        target = torch.randn(4, 10) + 100.0
+
+        standard = crps_ensemble(simulations, target)
+        af_one = afcrps_ensemble(simulations, target, alpha=1.0)
+
+        # Fair CRPS scales pairwise term by n/(n-1) > 1, so its spread penalty
+        # is larger, making fair CRPS <= standard CRPS for well-spread ensembles.
+        # The values should differ.
+        assert not torch.allclose(standard, af_one, atol=1e-5), (
+            "afCRPS(alpha=1) should differ from standard CRPS"
+        )
+
+    def test_monotonic_in_alpha(self):
+        """afCRPS should change monotonically as alpha goes from 0 to 1."""
+        torch.manual_seed(42)
+        simulations = torch.randn(4, 10, 50) + 100.0
+        target = torch.randn(4, 10) + 100.0
+
+        alphas = [0.0, 0.25, 0.5, 0.75, 0.95, 1.0]
+        means = [afcrps_ensemble(simulations, target, alpha=a).mean().item() for a in alphas]
+
+        # The pairwise scale increases with alpha, so the spread penalty grows
+        # and the afCRPS mean should decrease (or stay equal) as alpha increases.
+        for i in range(len(means) - 1):
+            assert means[i] >= means[i + 1] - 1e-5, (
+                f"afCRPS should be non-increasing in alpha: "
+                f"alpha={alphas[i]}->{alphas[i+1]}, mean={means[i]}->{means[i+1]}"
+            )
+
+    def test_default_alpha_is_095(self):
+        """Default alpha should be 0.95 per the AIFS-CRPS paper."""
+        torch.manual_seed(42)
+        simulations = torch.randn(4, 10, 50) + 100.0
+        target = torch.randn(4, 10) + 100.0
+
+        default = afcrps_ensemble(simulations, target)
+        explicit = afcrps_ensemble(simulations, target, alpha=0.95)
+
+        assert torch.allclose(default, explicit)
+
+    def test_shape_matches_standard_crps(self):
+        """afCRPS output shape should match crps_ensemble."""
+        simulations = torch.randn(4, 10, 50)
+        target = torch.randn(4, 10)
+
+        standard = crps_ensemble(simulations, target)
+        af = afcrps_ensemble(simulations, target)
+
+        assert af.shape == standard.shape
+
+    def test_non_negative(self):
+        """afCRPS should be non-negative for reasonable alpha values."""
+        torch.manual_seed(42)
+        simulations = torch.randn(4, 10, 50) + 100.0
+        target = torch.randn(4, 10) + 100.0
+
+        for alpha in [0.0, 0.5, 0.95, 1.0]:
+            af = afcrps_ensemble(simulations, target, alpha=alpha)
+            assert (af >= -1e-6).all(), (
+                f"afCRPS(alpha={alpha}) should be non-negative, min={af.min()}"
+            )
+
+    def test_perfect_forecast(self):
+        """afCRPS should be near zero for perfect forecasts."""
+        target = torch.tensor([[100.0, 101.0, 102.0]])
+        simulations = target.unsqueeze(-1).repeat(1, 1, 50)
+
+        af = afcrps_ensemble(simulations, target, alpha=0.95)
+        assert (af < 0.01).all(), f"afCRPS for perfect forecast should be near 0, got {af}"
+
+    def test_single_member(self):
+        """afCRPS with n_paths=1 should equal MAE (spread term is zero)."""
+        simulations = torch.randn(2, 5, 1) + 100.0
+        target = torch.randn(2, 5) + 100.0
+
+        af = afcrps_ensemble(simulations, target, alpha=0.95)
+        mae = torch.abs(simulations.squeeze(-1) - target)
+
+        assert torch.allclose(af, mae, atol=1e-5), "Single-member afCRPS should be MAE"
+
+    def test_gradient_flow(self):
+        """afCRPS should be differentiable and propagate gradients."""
+        simulations = torch.randn(2, 5, 20, requires_grad=True)
+        target = torch.randn(2, 5)
+
+        af = afcrps_ensemble(simulations, target, alpha=0.95)
+        loss = af.mean()
+        loss.backward()
+
+        assert simulations.grad is not None, "Gradients should flow through afCRPS"
+        assert torch.isfinite(simulations.grad).all(), "Gradients should be finite"
+
+    def test_numerical_stability_large_values(self):
+        """afCRPS should remain finite with large values."""
+        simulations = torch.ones(2, 5, 50) * 1e6
+        target = torch.ones(2, 5) * 1e6
+
+        af = afcrps_ensemble(simulations, target, alpha=0.95)
+        assert torch.isfinite(af).all()
 
 
 if __name__ == "__main__":

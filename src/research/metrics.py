@@ -39,6 +39,63 @@ def crps_ensemble(simulations: torch.Tensor, target: torch.Tensor) -> torch.Tens
     return diff_term - 0.5 * pairwise
 
 
+def afcrps_ensemble(
+    simulations: torch.Tensor,
+    target: torch.Tensor,
+    alpha: float = 0.95,
+) -> torch.Tensor:
+    """Almost-fair CRPS for ensemble forecasts (Lang et al., 2024).
+
+    Interpolates between the standard CRPS (alpha=0) and the fair CRPS
+    (alpha=1) to approximately remove finite-ensemble bias while avoiding
+    the fair-CRPS degeneracy where one member becomes unconstrained.
+
+        afCRPS_alpha = alpha * fCRPS + (1 - alpha) * CRPS
+
+    which expands to:
+
+        (1/M) sum_j |x_j - y|  -  (1 - eps) / (2 M (M-1)) sum_{j!=k} |x_j - x_k|
+
+    with eps = (1 - alpha) / M.
+
+    Uses the same O(n log n) sort-based algorithm as :func:`crps_ensemble`,
+    rescaling the pairwise spread term by  (M - 1 + alpha) / (M - 1).
+
+    Parameters
+    ----------
+    simulations : torch.Tensor
+        Ensemble members, last dimension is ensemble size M.
+    target : torch.Tensor
+        Observation(s), shape matching simulations without last dim.
+    alpha : float
+        Fairness level in (0, 1]. alpha=1 gives the fair CRPS, alpha=0 gives
+        the standard CRPS.  Default 0.95 per Lang et al.
+
+    Returns
+    -------
+    torch.Tensor
+        afCRPS values, same shape as target.
+    """
+    target = target.unsqueeze(-1)
+    diff_term = torch.abs(simulations - target).mean(dim=-1)
+
+    n = simulations.shape[-1]
+    sorted_sims, _ = torch.sort(simulations, dim=-1)
+    weights = (2.0 * torch.arange(n, device=simulations.device, dtype=simulations.dtype) - n + 1.0) / (n * n)
+    # pairwise = (1/n^2) * sum_ij |x_i - x_j|
+    pairwise = 2.0 * (sorted_sims * weights).sum(dim=-1)
+
+    # Scale from standard 1/(2n^2) to afCRPS coefficient (1-eps)/(2n(n-1))
+    # where eps = (1 - alpha) / n.
+    # scale = (1 - eps) * n / (n - 1) = (n - 1 + alpha) / (n - 1)
+    if n > 1:
+        scale = (n - 1.0 + alpha) / (n - 1.0)
+    else:
+        scale = 1.0
+
+    return diff_term - 0.5 * scale * pairwise
+
+
 def crps_torch_paths(simulations: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
     """High-performance CRPS over paths (batch, n_paths)."""
 
@@ -359,6 +416,7 @@ class CRPSMultiIntervalScorer:
 
 
 __all__ = [
+    "afcrps_ensemble",
     "crps_ensemble",
     "crps_torch_paths",
     "log_likelihood",
