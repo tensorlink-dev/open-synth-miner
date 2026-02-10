@@ -9,8 +9,12 @@ from src.models.factory import (
     simulate_bridge_paths,
     simulate_gbm_paths,
     simulate_horizon_paths,
+    simulate_t_horizon_paths,
 )
-from src.models.heads import GBMHead, HorizonHead, SimpleHorizonHead, NeuralBridgeHead, SDEHead
+from src.models.heads import (
+    GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
+    StudentTHorizonHead, NeuralBridgeHead, SDEHead,
+)
 
 
 class TestHeadOutputShapes:
@@ -65,6 +69,89 @@ class TestHeadOutputShapes:
             assert mu_seq.shape == (4, 12), f"Pool type {pool_type}: Expected (4, 12), got {mu_seq.shape}"
             assert sigma_seq.shape == (4, 12), f"Pool type {pool_type}: Expected (4, 12), got {sigma_seq.shape}"
             assert (sigma_seq > 0).all(), f"Pool type {pool_type}: Sigma should be positive"
+
+    def test_clt_horizon_head_output_shape(self):
+        """CLTHorizonHead should return (mu_seq, sigma_seq) both shaped (batch, horizon)."""
+        head = CLTHorizonHead(latent_size=128, hidden=64)
+        h_t = torch.randn(4, 128)
+        horizon = 60
+        mu_seq, sigma_seq = head(h_t, horizon)
+        assert mu_seq.shape == (4, 60), f"Expected (4, 60), got {mu_seq.shape}"
+        assert sigma_seq.shape == (4, 60), f"Expected (4, 60), got {sigma_seq.shape}"
+        assert (sigma_seq > 0).all(), "Sigma should be positive"
+
+    def test_clt_horizon_head_different_horizons(self):
+        """CLTHorizonHead should support arbitrary horizon lengths."""
+        head = CLTHorizonHead(latent_size=64)
+        h_t = torch.randn(2, 64)
+        for horizon in [1, 12, 48, 100]:
+            mu_seq, sigma_seq = head(h_t, horizon)
+            assert mu_seq.shape == (2, horizon)
+            assert sigma_seq.shape == (2, horizon)
+            assert (sigma_seq > 0).all()
+
+    def test_clt_horizon_head_stochastic_variation(self):
+        """CLTHorizonHead per-step params should vary across steps (not constant)."""
+        head = CLTHorizonHead(latent_size=64, hidden=64)
+        h_t = torch.randn(2, 64)
+        mu_seq, sigma_seq = head(h_t, 60)
+        # With 60 steps the std across steps should be non-zero
+        assert mu_seq.std(dim=-1).mean() > 0, "Per-step mu should vary"
+        assert sigma_seq.std(dim=-1).mean() > 0, "Per-step sigma should vary"
+
+    def test_clt_horizon_head_with_simulate_horizon_paths(self):
+        """CLTHorizonHead outputs should be compatible with simulate_horizon_paths."""
+        head = CLTHorizonHead(latent_size=64)
+        h_t = torch.randn(2, 64)
+        initial_price = torch.tensor([100.0, 200.0])
+        horizon = 12
+        n_paths = 50
+
+        mu_seq, sigma_seq = head(h_t, horizon)
+        paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths)
+
+        assert paths.shape == (2, 50, 12), f"Expected (2, 50, 12), got {paths.shape}"
+        assert (paths > 0).all(), "Prices should be positive"
+        assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
+
+    def test_student_t_horizon_head_output_shape(self):
+        """StudentTHorizonHead should return (mu_seq, sigma_seq, nu_seq)."""
+        head = StudentTHorizonHead(latent_size=128, hidden=64)
+        h_t = torch.randn(4, 128)
+        horizon = 60
+        mu_seq, sigma_seq, nu_seq = head(h_t, horizon)
+        assert mu_seq.shape == (4, 60), f"Expected (4, 60), got {mu_seq.shape}"
+        assert sigma_seq.shape == (4, 60), f"Expected (4, 60), got {sigma_seq.shape}"
+        assert nu_seq.shape == (4, 60), f"Expected (4, 60), got {nu_seq.shape}"
+        assert (sigma_seq > 0).all(), "Sigma should be positive"
+        assert (nu_seq > 2.0).all(), "Nu should be > 2 for finite variance"
+
+    def test_student_t_horizon_head_different_horizons(self):
+        """StudentTHorizonHead should support arbitrary horizon lengths."""
+        head = StudentTHorizonHead(latent_size=64)
+        h_t = torch.randn(2, 64)
+        for horizon in [1, 12, 48, 100]:
+            mu_seq, sigma_seq, nu_seq = head(h_t, horizon)
+            assert mu_seq.shape == (2, horizon)
+            assert sigma_seq.shape == (2, horizon)
+            assert nu_seq.shape == (2, horizon)
+            assert (sigma_seq > 0).all()
+            assert (nu_seq > 2.0).all()
+
+    def test_student_t_horizon_head_with_simulate_t_paths(self):
+        """StudentTHorizonHead outputs should be compatible with simulate_t_horizon_paths."""
+        head = StudentTHorizonHead(latent_size=64)
+        h_t = torch.randn(2, 64)
+        initial_price = torch.tensor([100.0, 200.0])
+        horizon = 12
+        n_paths = 50
+
+        mu_seq, sigma_seq, nu_seq = head(h_t, horizon)
+        paths = simulate_t_horizon_paths(initial_price, mu_seq, sigma_seq, nu_seq, n_paths)
+
+        assert paths.shape == (2, 50, 12), f"Expected (2, 50, 12), got {paths.shape}"
+        assert (paths > 0).all(), "Prices should be positive"
+        assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
 
     def test_neural_bridge_head_returns_3_values(self):
         """NeuralBridgeHead should return (macro_ret, micro_returns, sigma)."""
