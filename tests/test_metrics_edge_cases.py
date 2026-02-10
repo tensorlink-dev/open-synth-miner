@@ -10,6 +10,9 @@ from src.research.metrics import (
     calculate_price_changes_over_intervals,
     crps_ensemble,
     get_interval_steps,
+    generate_adaptive_intervals,
+    filter_valid_intervals,
+    CRPSMultiIntervalScorer,
 )
 
 
@@ -199,6 +202,153 @@ class TestNumericalStability:
         crps = crps_ensemble(simulations, target)
 
         assert torch.isfinite(crps).all(), "CRPS should remain finite with small values"
+
+
+class TestAdaptiveIntervals:
+    """Test adaptive interval generation and filtering."""
+
+    def test_generate_adaptive_intervals_short_horizon(self):
+        """Test generating intervals for a short 12-step horizon."""
+        # 12 steps at 60 seconds each = 720 seconds (12 minutes)
+        intervals = generate_adaptive_intervals(
+            horizon_steps=12,
+            time_increment=60,
+            min_intervals=3,
+        )
+
+        assert len(intervals) >= 2, "Should generate at least 2 intervals"
+        # All intervals should be <= 720 seconds
+        assert all(v <= 720 for v in intervals.values()), "All intervals should fit within horizon"
+        # All intervals should be > 0
+        assert all(v > 0 for v in intervals.values()), "All intervals should be positive"
+
+    def test_generate_adaptive_intervals_medium_horizon(self):
+        """Test generating intervals for a 24-step horizon."""
+        # 24 steps at 60 seconds each = 1440 seconds (24 minutes)
+        intervals = generate_adaptive_intervals(
+            horizon_steps=24,
+            time_increment=60,
+            min_intervals=3,
+        )
+
+        assert len(intervals) >= 3, "Should generate at least 3 intervals"
+        assert all(v <= 1440 for v in intervals.values()), "All intervals should fit within horizon"
+
+    def test_generate_adaptive_intervals_with_absolute(self):
+        """Test generating intervals with absolute price option."""
+        intervals = generate_adaptive_intervals(
+            horizon_steps=12,
+            time_increment=60,
+            include_absolute=True,
+        )
+
+        # Should have at least one interval ending with "_abs"
+        abs_intervals = [k for k in intervals.keys() if k.endswith("_abs")]
+        assert len(abs_intervals) > 0, "Should include at least one absolute interval"
+
+    def test_filter_valid_intervals_removes_too_large(self):
+        """Test that filter_valid_intervals removes intervals larger than horizon."""
+        # Horizon of 12 steps at 60s each = 720 seconds total
+        base_intervals = {
+            "5min": 300,      # 5 steps - VALID
+            "10min": 600,     # 10 steps - VALID
+            "30min": 1800,    # 30 steps - INVALID (exceeds 12 steps)
+            "1hour": 3600,    # 60 steps - INVALID
+        }
+
+        valid = filter_valid_intervals(
+            intervals=base_intervals,
+            horizon_steps=12,
+            time_increment=60,
+        )
+
+        assert "5min" in valid, "5min interval should be valid"
+        assert "10min" in valid, "10min interval should be valid"
+        assert "30min" not in valid, "30min interval should be filtered out"
+        assert "1hour" not in valid, "1hour interval should be filtered out"
+
+    def test_crps_scorer_adaptive_mode_short_horizon(self):
+        """Test CRPSMultiIntervalScorer with adaptive=True on short horizon."""
+        # Create a 12-step prediction
+        torch.manual_seed(42)
+        simulation_runs = torch.randn(50, 12) + 100.0  # 50 paths, 12 steps
+        real_price_path = torch.randn(12) + 100.0
+
+        # Create scorer with adaptive mode
+        scorer = CRPSMultiIntervalScorer(
+            time_increment=60,  # 1 minute per step
+            adaptive=True,
+            min_intervals=2,
+        )
+
+        total_crps, detailed = scorer(simulation_runs, real_price_path)
+
+        # Should get non-zero scores
+        assert total_crps > 0, f"Should get non-zero total CRPS, got {total_crps}"
+
+        # Should have some interval scores
+        interval_scores = [d for d in detailed if d["Increment"] == "Total" and d["Interval"] != "Overall"]
+        assert len(interval_scores) >= 1, "Should have at least 1 interval score"
+
+        # At least one interval should have non-zero CRPS
+        non_zero = [d for d in interval_scores if d["CRPS"] > 0]
+        assert len(non_zero) >= 1, f"Should have at least 1 non-zero interval score, got {interval_scores}"
+
+    def test_crps_scorer_non_adaptive_mode(self):
+        """Test CRPSMultiIntervalScorer with adaptive=False (original behavior)."""
+        torch.manual_seed(42)
+        simulation_runs = torch.randn(50, 12) + 100.0
+        real_price_path = torch.randn(12) + 100.0
+
+        # Create scorer with adaptive mode OFF
+        scorer = CRPSMultiIntervalScorer(
+            time_increment=60,
+            adaptive=False,  # Use original fixed intervals
+        )
+
+        total_crps, detailed = scorer(simulation_runs, real_price_path)
+
+        # This should work but may have many zero scores for intervals that don't fit
+        assert isinstance(total_crps, float), "Should return a float"
+        assert isinstance(detailed, list), "Should return detailed scores"
+
+    def test_crps_scorer_caches_intervals(self):
+        """Test that scorer caches adapted intervals for efficiency."""
+        scorer = CRPSMultiIntervalScorer(
+            time_increment=60,
+            adaptive=True,
+        )
+
+        # First call for 12-step horizon
+        intervals_12 = scorer.get_intervals_for_horizon(12)
+        # Second call should use cache
+        intervals_12_cached = scorer.get_intervals_for_horizon(12)
+
+        assert intervals_12 is intervals_12_cached, "Should return cached intervals"
+
+        # Different horizon should generate new intervals
+        intervals_24 = scorer.get_intervals_for_horizon(24)
+        assert intervals_24 is not intervals_12, "Different horizons should have different intervals"
+
+    def test_adaptive_intervals_very_short_horizon(self):
+        """Test adaptive intervals with very short horizon (edge case)."""
+        intervals = generate_adaptive_intervals(
+            horizon_steps=3,
+            time_increment=60,
+        )
+
+        # Should still generate at least 1 interval
+        assert len(intervals) >= 1, "Should generate at least 1 interval even for short horizon"
+
+    def test_adaptive_intervals_single_step_horizon(self):
+        """Test adaptive intervals with single-step horizon."""
+        intervals = generate_adaptive_intervals(
+            horizon_steps=1,
+            time_increment=60,
+        )
+
+        # Cannot compute meaningful intervals with single step
+        assert len(intervals) == 0, "Should return empty dict for single-step horizon"
 
 
 if __name__ == "__main__":
