@@ -19,13 +19,22 @@ EPS = 1e-12
 
 
 def crps_ensemble(simulations: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Vectorized CRPS for ensemble forecasts using the empirical formula."""
+    """Sort-based CRPS for ensemble forecasts — O(M log M) time, O(M) memory.
 
+    Replaces the naive pairwise formulation which allocates an
+    O(batch × horizon × M²) tensor and causes CUDA OOM at large horizons.
+
+    The pairwise spread E|X-X'| is computed exactly via sorted samples:
+        Σ_i Σ_j |x_i - x_j| = 2 Σ_i x_(i) (2i + 1 - M)   [0-indexed]
+    """
+    M = simulations.shape[-1]
     target = target.unsqueeze(-1)
     diff_term = torch.abs(simulations - target).mean(dim=-1)
 
-    sims = simulations.unsqueeze(-1)
-    pairwise = torch.abs(sims - sims.transpose(-1, -2)).mean(dim=(-1, -2))
+    sorted_sims, _ = torch.sort(simulations, dim=-1)
+    weights = (2.0 * torch.arange(M, device=simulations.device, dtype=simulations.dtype)
+               + 1.0 - M)
+    pairwise = (2.0 / (M * M)) * (sorted_sims * weights).sum(dim=-1)
     return diff_term - 0.5 * pairwise
 
 
