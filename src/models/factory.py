@@ -19,7 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase
-from .heads import GBMHead, HorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
+from .heads import GBMHead, HorizonHead, SimpleHorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
 from .registry import discover_components
 
 # Maximum absolute log-return for numerical stability in exp() operations
@@ -187,7 +187,7 @@ class SynthModel(nn.Module):
             )
             return paths, macro_ret.squeeze(-1), sigma
 
-        if isinstance(self.head, HorizonHead):
+        if isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
             paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
@@ -323,6 +323,7 @@ HEAD_REGISTRY = {
     "sde": SDEHead,
     "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
+    "simple_horizon": SimpleHorizonHead,
     "neural_bridge": NeuralBridgeHead,
 }
 

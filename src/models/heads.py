@@ -413,6 +413,164 @@ class HorizonHead(HeadBase):
         return mu, sigma
 
 
+class SimpleHorizonHead(HeadBase):
+    """Lightweight horizon head without attention - uses pooling + MLPs.
+
+    This is a memory-efficient alternative to :class:`HorizonHead` that avoids
+    the computational overhead of multi-head cross-attention. Instead of
+    cross-attending to the full backbone sequence, it:
+
+    1. **Pools** the backbone sequence into a fixed-size context vector
+    2. **Combines** learned horizon embeddings with the pooled context
+    3. **Projects** through simple feedforward networks to per-step parameters
+
+    Architecture::
+
+        Backbone sequence  (batch, seq, d_model)
+                │
+                ▼
+        ┌─────────────────────┐
+        │  Sequence Pooling   │  mean/max → (batch, d_model)
+        └────────┬────────────┘
+                 │
+                 ▼  (batch, d_model)
+        ┌─────────────────────┐
+        │  Learned horizon     │  (horizon_max, d_model) embeddings
+        │  position embeddings │  + sinusoidal base
+        └────────┬────────────┘
+                 │
+                 ▼  broadcast & concat
+        ┌─────────────────────┐
+        │  Feedforward Network │  (batch, horizon, 2*d_model) → (batch, horizon, d_model)
+        └────────┬────────────┘
+                 │
+                 ▼
+        ┌─────────────────────┐
+        │  Per-step projection │  d_model → (mu_t, sigma_t)
+        └────────┬────────────┘
+                 │
+                 ▼
+        mu: (batch, horizon)   sigma: (batch, horizon)
+
+    **Complexity Comparison**:
+
+    - **HorizonHead**: O(horizon × seq_len × d_model) per attention layer
+    - **SimpleHorizonHead**: O(seq_len × d_model) pooling + O(horizon × d_model²) MLP
+
+    For typical values (seq_len=64, horizon=12, d_model=64), SimpleHorizonHead
+    is ~10-20x more memory efficient.
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    horizon_max:
+        Maximum prediction horizon supported.
+    hidden_dim:
+        Hidden dimension of the feedforward network. Default: latent_size * 2.
+    pool_type:
+        Pooling strategy over sequence dimension: "mean", "max", or "mean+max".
+        Default: "mean".
+    dropout:
+        Dropout rate in feedforward network. Default: 0.1.
+    """
+
+    def __init__(
+        self,
+        latent_size: int,
+        horizon_max: int = 48,
+        hidden_dim: int | None = None,
+        pool_type: str = "mean",
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.latent_size = latent_size
+        self.horizon_max = horizon_max
+        self.pool_type = pool_type
+        hidden_dim = hidden_dim or latent_size * 2
+
+        # Validate pool_type
+        if pool_type not in ("mean", "max", "mean+max"):
+            raise ValueError(f"pool_type must be 'mean', 'max', or 'mean+max', got {pool_type}")
+
+        # Determine context dimension based on pooling
+        context_dim = latent_size * 2 if pool_type == "mean+max" else latent_size
+
+        # Learned horizon query embeddings
+        self.horizon_queries = nn.Parameter(
+            torch.randn(horizon_max, latent_size) * 0.02
+        )
+
+        # Sinusoidal positional encoding for the horizon queries
+        pe = torch.zeros(horizon_max, latent_size)
+        position = torch.arange(0, horizon_max, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, latent_size, 2, dtype=torch.float)
+            * (-math.log(10000.0) / latent_size)
+        )
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term[: latent_size // 2])
+        self.register_buffer("pe", pe)
+
+        # Feedforward network to combine context + horizon embeddings
+        self.ff = nn.Sequential(
+            nn.Linear(context_dim + latent_size, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, latent_size),
+            nn.Dropout(dropout),
+        )
+
+        # Per-step projection to (mu_t, sigma_t)
+        self.mu_proj = nn.Linear(latent_size, 1)
+        self.sigma_proj = nn.Linear(latent_size, 1)
+
+    def forward(
+        self,
+        h_seq: torch.Tensor,
+        horizon: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_seq : (batch, seq_len, d_model) — full backbone sequence output
+        horizon : prediction length (≤ horizon_max)
+
+        Returns
+        -------
+        mu : (batch, horizon) — per-step drift
+        sigma : (batch, horizon) — per-step volatility (positive)
+        """
+        batch = h_seq.shape[0]
+        h = min(horizon, self.horizon_max)
+
+        # Pool sequence to get context vector
+        if self.pool_type == "mean":
+            context = h_seq.mean(dim=1)  # (batch, d_model)
+        elif self.pool_type == "max":
+            context = h_seq.max(dim=1)[0]  # (batch, d_model)
+        else:  # mean+max
+            mean_pool = h_seq.mean(dim=1)
+            max_pool = h_seq.max(dim=1)[0]
+            context = torch.cat([mean_pool, max_pool], dim=-1)  # (batch, 2*d_model)
+
+        # Build horizon queries: learned embedding + sinusoidal position
+        horizon_emb = (self.horizon_queries[:h] + self.pe[:h]).unsqueeze(0).expand(batch, -1, -1)
+        # (batch, horizon, d_model)
+
+        # Broadcast context and concatenate with horizon embeddings
+        context_expanded = context.unsqueeze(1).expand(-1, h, -1)  # (batch, horizon, context_dim)
+        combined = torch.cat([context_expanded, horizon_emb], dim=-1)  # (batch, horizon, context_dim + d_model)
+
+        # Feedforward network
+        features = self.ff(combined)  # (batch, horizon, d_model)
+
+        # Project to per-step parameters
+        mu = self.mu_proj(features).squeeze(-1)                           # (batch, horizon)
+        sigma = F.softplus(self.sigma_proj(features)).squeeze(-1) + 1e-6  # (batch, horizon)
+        return mu, sigma
+
+
 # ---------------------------------------------------------------------------
 # Neural Bridge Head (hierarchical macro + micro texture)
 # ---------------------------------------------------------------------------
