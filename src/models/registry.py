@@ -49,10 +49,38 @@ class Registry:
 
         return decorator
 
-    def register_block(self, name: Optional[str] = None) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
+    def register_block(
+        self,
+        name: Optional[str] = None,
+        *,
+        preserves_seq_len: bool = True,
+        preserves_d_model: bool = True,
+        min_seq_len: int = 1,
+    ) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
+        """Register a backbone block with optional shape metadata.
+
+        Parameters
+        ----------
+        name : str, optional
+            Registry key (defaults to ``cls.__name__``).
+        preserves_seq_len : bool
+            Whether the block preserves sequence length (default True).
+        preserves_d_model : bool
+            Whether the block preserves the feature dimension (default True).
+        min_seq_len : int
+            Minimum sequence length the block can handle (default 1).
+
+        The metadata is stored as class-level attributes so that
+        ``HybridBackbone.validate_shapes`` can inspect blocks without
+        running a forward pass.
+        """
         def decorator(cls: Type[nn.Module]) -> Type[nn.Module]:
             key = (name or cls.__name__).lower()
             self._ensure_unique(self.blocks, key)
+            # Stamp shape metadata onto the class for introspection.
+            cls.preserves_seq_len = preserves_seq_len
+            cls.preserves_d_model = preserves_d_model
+            cls.min_seq_len = min_seq_len
             self.blocks[key] = cls
             return cls
 

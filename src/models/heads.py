@@ -3,6 +3,7 @@ Heads mapping latent contexts to stochastic simulation parameters.
 """
 from __future__ import annotations
 
+import logging
 import math
 from typing import Tuple
 
@@ -10,6 +11,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchsde
+
+logger = logging.getLogger(__name__)
 
 
 class HeadBase(nn.Module):
@@ -389,6 +392,13 @@ class HorizonHead(HeadBase):
         sigma : (batch, horizon) — per-step volatility (positive)
         """
         batch = h_seq.shape[0]
+        if horizon > self.horizon_max:
+            logger.warning(
+                "HorizonHead: requested horizon=%d exceeds horizon_max=%d; "
+                "output will be clipped to %d steps. Increase horizon_max in "
+                "the head config to support longer horizons.",
+                horizon, self.horizon_max, self.horizon_max,
+            )
         h = min(horizon, self.horizon_max)
 
         # Build horizon queries: learned embedding + sinusoidal position
@@ -542,6 +552,13 @@ class SimpleHorizonHead(HeadBase):
         sigma : (batch, horizon) — per-step volatility (positive)
         """
         batch = h_seq.shape[0]
+        if horizon > self.horizon_max:
+            logger.warning(
+                "SimpleHorizonHead: requested horizon=%d exceeds horizon_max=%d; "
+                "output will be clipped to %d steps. Increase horizon_max in "
+                "the head config to support longer horizons.",
+                horizon, self.horizon_max, self.horizon_max,
+            )
         h = min(horizon, self.horizon_max)
 
         # Pool sequence to get context vector
