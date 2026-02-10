@@ -364,7 +364,14 @@ class FlexiblePatchEmbed(nn.Module):
 
 @registry.register_block("channelrejoin")
 class ChannelRejoin(nn.Module):
-    """Reshape channel-independent batches back to original structure."""
+    """Reshape channel-independent batches back to original structure.
+
+    Modes
+    -----
+    * ``"flatten"`` – concatenate channels: ``(B, T, C * d_model)``
+    * ``"mean"``    – average across channels: ``(B, T, d_model)``
+    * ``"stack"``   – keep 4-D: ``(B, C, T, d_model)``
+    """
 
     def __init__(self, num_channels: int, mode: str = "flatten") -> None:
         super().__init__()
@@ -381,6 +388,8 @@ class ChannelRejoin(nn.Module):
 
         if self.mode == "flatten":
             return x.permute(0, 2, 1, 3).reshape(batch, seq_len, self.num_channels * d_model)
+        if self.mode == "mean":
+            return x.mean(dim=1)  # (batch, seq_len, d_model)
         if self.mode == "stack":
             return x
         return x

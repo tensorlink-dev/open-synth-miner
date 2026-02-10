@@ -2,7 +2,13 @@ import torch
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-from src.models.components.advanced_blocks import LayerNormBlock
+from src.models.components.advanced_blocks import (
+    ChannelRejoin,
+    DLinearBlock,
+    FlexiblePatchEmbed,
+    LayerNormBlock,
+)
+from src.models.factory import HybridBackbone
 
 
 def test_hybrid_backbone_infers_output_dim_with_input_projection():
@@ -70,3 +76,100 @@ def test_hybrid_backbone_layernorm_block_shape_preservation():
     # Verify standard forward returns last step
     output = backbone(sample)
     assert output.shape == (batch_size, cfg.model.backbone.d_model)
+
+
+def test_skip_input_proj_with_patch_embed_and_channel_rejoin():
+    """FlexiblePatchEmbed + ChannelRejoin with skip_input_proj produces correct shapes."""
+    d_model = 32
+    in_channels = 3
+    patch_len = 12
+    stride = 12
+
+    blocks = [
+        FlexiblePatchEmbed(
+            d_model=d_model,
+            patch_len=patch_len,
+            stride=stride,
+            in_channels=in_channels,
+            channel_independence=True,
+        ),
+        DLinearBlock(d_model=d_model, kernel_size=5),
+        ChannelRejoin(num_channels=in_channels, mode="mean"),
+    ]
+
+    backbone = HybridBackbone(
+        input_size=in_channels,
+        d_model=d_model,
+        blocks=blocks,
+        skip_input_proj=True,
+        validate_shapes=False,
+    )
+
+    batch, seq = 4, 64
+    x = torch.randn(batch, seq, in_channels)
+    out = backbone(x)
+    assert out.shape == (batch, d_model), f"Expected ({batch}, {d_model}), got {out.shape}"
+
+    out_seq = backbone.forward_sequence(x)
+    assert out_seq.ndim == 3
+    assert out_seq.shape[0] == batch
+    assert out_seq.shape[2] == d_model
+
+
+def test_skip_input_proj_with_flatten_rejoin():
+    """ChannelRejoin mode='flatten' produces (batch, seq, channels * d_model)."""
+    d_model = 16
+    in_channels = 5
+    patch_len = 8
+    stride = 8
+
+    blocks = [
+        FlexiblePatchEmbed(
+            d_model=d_model,
+            patch_len=patch_len,
+            stride=stride,
+            in_channels=in_channels,
+            channel_independence=True,
+        ),
+        ChannelRejoin(num_channels=in_channels, mode="flatten"),
+    ]
+
+    backbone = HybridBackbone(
+        input_size=in_channels,
+        d_model=d_model,
+        blocks=blocks,
+        skip_input_proj=True,
+        validate_shapes=False,
+    )
+
+    batch, seq = 2, 64
+    x = torch.randn(batch, seq, in_channels)
+    out = backbone(x)
+    assert out.shape == (batch, in_channels * d_model)
+
+
+def test_skip_input_proj_false_is_backward_compatible():
+    """Default skip_input_proj=False preserves existing behavior."""
+    d_model = 32
+    blocks = [DLinearBlock(d_model=d_model, kernel_size=5)]
+
+    backbone = HybridBackbone(
+        input_size=3,
+        d_model=d_model,
+        blocks=blocks,
+        skip_input_proj=False,
+    )
+
+    x = torch.randn(2, 20, 3)
+    out = backbone(x)
+    assert out.shape == (2, d_model)
+    assert isinstance(backbone.input_proj, torch.nn.Linear)
+
+
+def test_channel_rejoin_mean_mode():
+    """ChannelRejoin mean mode averages across channels."""
+    rejoin = ChannelRejoin(num_channels=3, mode="mean")
+    # Simulate (batch*channels, seq, d_model)
+    x = torch.randn(6, 10, 16)  # batch=2, channels=3
+    out = rejoin(x)
+    assert out.shape == (2, 10, 16)

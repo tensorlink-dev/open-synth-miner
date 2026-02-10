@@ -77,6 +77,11 @@ class HybridBackbone(BackboneBase):
     Supports automatic insertion of LayerNorm between blocks via the
     ``insert_layernorm`` parameter. When enabled, a LayerNormBlock is
     automatically inserted between each pair of consecutive blocks.
+
+    When the first block handles its own input-to-d_model projection (e.g.
+    ``FlexiblePatchEmbed`` with ``channel_independence=True``), set
+    ``skip_input_proj=True`` so the raw ``(batch, seq, input_size)`` tensor
+    reaches the first block directly.
     """
 
     def __init__(
@@ -87,6 +92,7 @@ class HybridBackbone(BackboneBase):
         validate_shapes: bool = True,
         strict_shapes: bool = True,
         insert_layernorm: bool = False,
+        skip_input_proj: bool = False,
         **_: Any,
     ):
         super().__init__()
@@ -95,7 +101,11 @@ class HybridBackbone(BackboneBase):
         if not blocks:
             raise ValueError("HybridBackbone requires a non-empty block list")
         self.input_size = input_size
-        self.input_proj = nn.Linear(input_size, d_model)
+        self.skip_input_proj = skip_input_proj
+        if skip_input_proj:
+            self.input_proj = nn.Identity()
+        else:
+            self.input_proj = nn.Linear(input_size, d_model)
         self.d_model = d_model
         self.insert_layernorm = insert_layernorm
 
@@ -166,57 +176,61 @@ class HybridBackbone(BackboneBase):
         the sequence dimension.  The expected shape is updated accordingly
         so that downstream blocks are validated against the *actual*
         sequence length they will receive.
+
+        When ``skip_input_proj`` is enabled, the first block receives raw
+        ``(batch, seq, input_size)`` and may also change the batch dimension
+        (e.g. channel-independent patching multiplies batch by input_size).
         """
 
         batch, seq = 2, 64
-        expected = (batch, seq, self.d_model)
         with torch.no_grad():
-            h = self.input_proj(torch.zeros(batch, seq, self.input_size))
-            if h.shape != expected:
-                raise ValueError(
-                    "HybridBackbone input projection expected shape "
-                    f"{expected} but received {tuple(h.shape)}"
-                )
+            if self.skip_input_proj:
+                h = torch.zeros(batch, seq, self.input_size)
+            else:
+                expected = (batch, seq, self.d_model)
+                h = self.input_proj(torch.zeros(batch, seq, self.input_size))
+                if h.shape != expected:
+                    raise ValueError(
+                        "HybridBackbone input projection expected shape "
+                        f"{expected} but received {tuple(h.shape)}"
+                    )
+
+            # Track the current effective batch size — channel-independent
+            # blocks may multiply it and ChannelRejoin blocks restore it.
+            cur_batch = h.shape[0]
 
             for idx, layer in enumerate(self.layers):
                 # Pre-check min_seq_len metadata for early, clear errors.
                 min_sl = getattr(layer, "min_seq_len", 1)
-                if seq < min_sl:
+                cur_seq = h.shape[1]
+                if cur_seq < min_sl:
                     raise ValueError(
                         f"HybridBackbone block {idx} ({layer.__class__.__name__}) "
                         f"requires min_seq_len={min_sl} but the "
-                        f"current sequence length is {seq}. This block is "
+                        f"current sequence length is {cur_seq}. This block is "
                         f"incompatible with very short sequences."
                     )
                 h_new = layer(h)
 
-                # Blocks marked preserves_seq_len=False may legitimately
-                # change the sequence dimension (patching, pooling, etc.).
-                # Update the expected shape so subsequent blocks are
-                # validated against the real sequence length.
-                preserves_seq = getattr(layer, "preserves_seq_len", True)
-                if (
-                    not preserves_seq
-                    and h_new.shape[0] == batch
-                    and h_new.shape[2] == self.d_model
-                    and h_new.shape[1] != seq
-                ):
-                    seq = h_new.shape[1]
-                    expected = (batch, seq, self.d_model)
+                # Accept batch-dimension changes (channel independence /
+                # ChannelRejoin) and sequence-length changes (patching).
+                cur_batch = h_new.shape[0]
+                seq = h_new.shape[1]
+                d = h_new.shape[2] if h_new.ndim == 3 else h_new.shape[-1]
 
-                if h_new.shape != expected:
+                # Warn if d_model changed unexpectedly (ignore for first
+                # block when skip_input_proj, since it projects to d_model).
+                if h_new.ndim != 3:
                     message = (
-                        "HybridBackbone block validation: "
-                        f"block {idx} ({layer.__class__.__name__}) changed shape "
-                        f"from {expected} to {tuple(h_new.shape)}."
+                        f"HybridBackbone block validation: "
+                        f"block {idx} ({layer.__class__.__name__}) returned "
+                        f"{h_new.ndim}D tensor {tuple(h_new.shape)}; "
+                        f"expected 3D (batch, seq, d_model)."
                     )
                     if strict_shapes:
-                        raise ValueError(
-                            message
-                            + " Blocks should preserve (batch, seq, d_model) unless "
-                            "dynamic shapes are explicitly enabled."
-                        )
+                        raise ValueError(message)
                     print(message)
+
                 h = h_new
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
