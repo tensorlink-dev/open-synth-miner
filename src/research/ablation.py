@@ -153,7 +153,8 @@ class AblationExperiment:
         print(f"[{name}] Starting backtest...")
 
         scorer = CRPSMultiIntervalScorer(
-            time_increment=cfg.backtest.get("time_increment", 60)
+            time_increment=cfg.backtest.get("time_increment", 60),
+            adaptive=True,  # Automatically adapt intervals to horizon length
         )
 
         runner = BacktestRunner(

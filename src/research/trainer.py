@@ -216,7 +216,10 @@ def evaluate_and_log(
         series = actual_series if actual_series is not None else target.unsqueeze(-1).repeat(1, horizon)
 
         if actual_series is not None:
-            scorer = CRPSMultiIntervalScorer(time_increment=time_increment)
+            scorer = CRPSMultiIntervalScorer(
+                time_increment=time_increment,
+                adaptive=True,  # Automatically adapt intervals to horizon length
+            )
             interval_totals = []
             for batch_idx in range(paths.shape[0]):
                 total, _ = scorer(paths[batch_idx], actual_series[batch_idx])
