@@ -149,7 +149,7 @@ class HybridBackbone(BackboneBase):
         return result
 
     def _infer_output_dim(self) -> int:
-        sample = torch.zeros(1, 2, self.input_size)
+        sample = torch.zeros(1, 64, self.input_size)
         with torch.no_grad():
             out = self.forward(sample)
         return out.shape[-1]
@@ -160,9 +160,15 @@ class HybridBackbone(BackboneBase):
         When blocks subclass :class:`BlockBase`, their ``min_seq_len``
         attribute is checked *before* the forward pass so that failures
         produce actionable messages instead of cryptic reshape errors.
+
+        Blocks registered with ``preserves_seq_len=False`` (e.g.
+        ``FlexiblePatchEmbed``, ``PatchEmbedding``) are allowed to change
+        the sequence dimension.  The expected shape is updated accordingly
+        so that downstream blocks are validated against the *actual*
+        sequence length they will receive.
         """
 
-        batch, seq = 2, 3
+        batch, seq = 2, 64
         expected = (batch, seq, self.d_model)
         with torch.no_grad():
             h = self.input_proj(torch.zeros(batch, seq, self.input_size))
@@ -173,15 +179,31 @@ class HybridBackbone(BackboneBase):
                 )
 
             for idx, layer in enumerate(self.layers):
-                # Pre-check BlockBase metadata for early, clear errors.
-                if isinstance(layer, BlockBase) and seq < layer.min_seq_len:
+                # Pre-check min_seq_len metadata for early, clear errors.
+                min_sl = getattr(layer, "min_seq_len", 1)
+                if seq < min_sl:
                     raise ValueError(
                         f"HybridBackbone block {idx} ({layer.__class__.__name__}) "
-                        f"requires min_seq_len={layer.min_seq_len} but the "
-                        f"validation probe uses seq_len={seq}. This block is "
+                        f"requires min_seq_len={min_sl} but the "
+                        f"current sequence length is {seq}. This block is "
                         f"incompatible with very short sequences."
                     )
                 h_new = layer(h)
+
+                # Blocks marked preserves_seq_len=False may legitimately
+                # change the sequence dimension (patching, pooling, etc.).
+                # Update the expected shape so subsequent blocks are
+                # validated against the real sequence length.
+                preserves_seq = getattr(layer, "preserves_seq_len", True)
+                if (
+                    not preserves_seq
+                    and h_new.shape[0] == batch
+                    and h_new.shape[2] == self.d_model
+                    and h_new.shape[1] != seq
+                ):
+                    seq = h_new.shape[1]
+                    expected = (batch, seq, self.d_model)
+
                 if h_new.shape != expected:
                     message = (
                         "HybridBackbone block validation: "
@@ -545,7 +567,7 @@ def build_model(model_cfg: Dict | DictConfig) -> SynthModel:
     return SynthModel(backbone=backbone, head=head)
 
 
-def _smoke_test_model(model: SynthModel, input_size: int, seq_len: int = 8) -> None:
+def _smoke_test_model(model: SynthModel, input_size: int, seq_len: int = 64) -> None:
     """Run a tiny forward pass to surface shape errors at construction time.
 
     This catches feature_dim/input_size mismatches, latent_size/d_model
