@@ -11,5 +11,7 @@ data:
   input_len: ${training.seq_len}
   pred_len: ${training.horizon}
   batch_size: ${training.batch_size}
+  # feature_dim is auto-detected from engineer (OHLCVEngineer outputs 16 features)
+  # This config value is used for model input_size and serves as documentation
   feature_dim: 16
   stride: 1
