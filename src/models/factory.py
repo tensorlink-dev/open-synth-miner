@@ -19,7 +19,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase
-from .heads import GBMHead, HorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
+from .heads import GBMHead, HorizonHead, SimpleHorizonHead, NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase
 from .registry import discover_components
 
 # Maximum absolute log-return for numerical stability in exp() operations
@@ -52,7 +52,12 @@ class ParallelFusion(nn.Module):
 
 
 class HybridBackbone(BackboneBase):
-    """Backbone that stitches Hydra-instantiated blocks or callables."""
+    """Backbone that stitches Hydra-instantiated blocks or callables.
+
+    Supports automatic insertion of LayerNorm between blocks via the
+    ``insert_layernorm`` parameter. When enabled, a LayerNormBlock is
+    automatically inserted between each pair of consecutive blocks.
+    """
 
     def __init__(
         self,
@@ -61,6 +66,7 @@ class HybridBackbone(BackboneBase):
         blocks: List[Any],
         validate_shapes: bool = True,
         strict_shapes: bool = True,
+        insert_layernorm: bool = False,
         **_: Any,
     ):
         super().__init__()
@@ -71,7 +77,14 @@ class HybridBackbone(BackboneBase):
         self.input_size = input_size
         self.input_proj = nn.Linear(input_size, d_model)
         self.d_model = d_model
-        self.layers = nn.ModuleList([self._materialize_block(block) for block in blocks])
+        self.insert_layernorm = insert_layernorm
+
+        # Materialize blocks and optionally insert LayerNorm between them
+        materialized_blocks = [self._materialize_block(block) for block in blocks]
+        if insert_layernorm:
+            materialized_blocks = self._insert_layernorm_between_blocks(materialized_blocks)
+
+        self.layers = nn.ModuleList(materialized_blocks)
         if validate_shapes:
             self.validate_shapes(strict_shapes=strict_shapes)
         self.output_dim = self._infer_output_dim()
@@ -93,6 +106,27 @@ class HybridBackbone(BackboneBase):
         if "input_dim" in signature.parameters:
             kwargs["input_dim"] = self.d_model
         return fn(**kwargs) if kwargs else fn()
+
+    def _insert_layernorm_between_blocks(self, blocks: List[nn.Module]) -> List[nn.Module]:
+        """Insert LayerNormBlock between consecutive blocks.
+
+        Each LayerNormBlock normalizes activations using layer normalization
+        with the model dimension.
+        """
+        if len(blocks) <= 1:
+            return blocks
+
+        # Import LayerNormBlock here to avoid circular imports
+        from .components.advanced_blocks import LayerNormBlock
+
+        result: List[nn.Module] = []
+        for block in blocks:
+            result.append(block)
+            result.append(LayerNormBlock(d_model=self.d_model))
+
+        # Remove the trailing LayerNormBlock after the last block
+        result.pop()
+        return result
 
     def _infer_output_dim(self) -> int:
         sample = torch.zeros(1, 2, self.input_size)
@@ -187,7 +221,7 @@ class SynthModel(nn.Module):
             )
             return paths, macro_ret.squeeze(-1), sigma
 
-        if isinstance(self.head, HorizonHead):
+        if isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
             paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
@@ -323,6 +357,7 @@ HEAD_REGISTRY = {
     "sde": SDEHead,
     "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
+    "simple_horizon": SimpleHorizonHead,
     "neural_bridge": NeuralBridgeHead,
 }
 

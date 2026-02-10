@@ -25,7 +25,8 @@ Different heads return different parameter sets:
 |-----------|------------------|-------------|
 | `GBMHead` | `(mu, sigma)` | Constant drift and volatility scalars |
 | `SDEHead` | `(mu, sigma)` | SDE parameters via deeper network |
-| `HorizonHead` | `(mu_seq, sigma_seq)` | Per-step drift and volatility sequences |
+| `HorizonHead` | `(mu_seq, sigma_seq)` | Per-step drift and volatility sequences (with cross-attention) |
+| `SimpleHorizonHead` | `(mu_seq, sigma_seq)` | Per-step drift and volatility sequences (pooling + MLP, no attention) |
 | `NeuralBridgeHead` | `(macro_ret, micro_returns, sigma)` | Macro target, micro trajectory, volatility |
 
 **Why variable returns?** Each head represents a different stochastic process. Rather than force a common structure, we document contracts and let `SynthModel.forward()` handle the conversion to uniform path outputs.
@@ -51,7 +52,7 @@ The codebase uses Abstract Base Classes to define extension points following the
 #### Model Components
 
 - **`HeadBase`** - Simulation parameter heads
-  - Implementations: `GBMHead`, `SDEHead`, `HorizonHead`, `NeuralBridgeHead`
+  - Implementations: `GBMHead`, `SDEHead`, `HorizonHead`, `SimpleHorizonHead`, `NeuralBridgeHead`
   - Map backbone latent representations to stochastic simulation parameters
 
 - **`BackboneBase`** - Sequence encoders

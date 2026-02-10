@@ -10,7 +10,7 @@ from src.models.factory import (
     simulate_gbm_paths,
     simulate_horizon_paths,
 )
-from src.models.heads import GBMHead, HorizonHead, NeuralBridgeHead, SDEHead
+from src.models.heads import GBMHead, HorizonHead, SimpleHorizonHead, NeuralBridgeHead, SDEHead
 
 
 class TestHeadOutputShapes:
@@ -43,6 +43,28 @@ class TestHeadOutputShapes:
         assert mu_seq.shape == (4, 60), f"Expected (4, 60), got {mu_seq.shape}"
         assert sigma_seq.shape == (4, 60), f"Expected (4, 60), got {sigma_seq.shape}"
         assert (sigma_seq > 0).all(), "Sigma should be positive"
+
+    def test_simple_horizon_head_output_shape(self):
+        """SimpleHorizonHead should return (mu_seq, sigma_seq) both shaped (batch, horizon)."""
+        head = SimpleHorizonHead(latent_size=128, horizon_max=100)
+        h_seq = torch.randn(4, 50, 128)  # (batch, seq, d_model)
+        horizon = 60
+        mu_seq, sigma_seq = head(h_seq, horizon)
+        assert mu_seq.shape == (4, 60), f"Expected (4, 60), got {mu_seq.shape}"
+        assert sigma_seq.shape == (4, 60), f"Expected (4, 60), got {sigma_seq.shape}"
+        assert (sigma_seq > 0).all(), "Sigma should be positive"
+
+    def test_simple_horizon_head_pool_types(self):
+        """SimpleHorizonHead should work with all pool types."""
+        h_seq = torch.randn(4, 50, 128)
+        horizon = 12
+
+        for pool_type in ["mean", "max", "mean+max"]:
+            head = SimpleHorizonHead(latent_size=128, horizon_max=48, pool_type=pool_type)
+            mu_seq, sigma_seq = head(h_seq, horizon)
+            assert mu_seq.shape == (4, 12), f"Pool type {pool_type}: Expected (4, 12), got {mu_seq.shape}"
+            assert sigma_seq.shape == (4, 12), f"Pool type {pool_type}: Expected (4, 12), got {sigma_seq.shape}"
+            assert (sigma_seq > 0).all(), f"Pool type {pool_type}: Sigma should be positive"
 
     def test_neural_bridge_head_returns_3_values(self):
         """NeuralBridgeHead should return (macro_ret, micro_returns, sigma)."""
