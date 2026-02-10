@@ -19,13 +19,23 @@ EPS = 1e-12
 
 
 def crps_ensemble(simulations: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
-    """Vectorized CRPS for ensemble forecasts using the empirical formula."""
+    """Vectorized CRPS for ensemble forecasts using the empirical formula.
 
+    Uses a sort-based algorithm to compute the pairwise term in O(n log n) time
+    and O(n) memory, instead of the naive O(n^2) pairwise distance matrix.
+
+    The identity used is:
+        (1/n^2) * sum_ij |x_i - x_j| = (2/n^2) * sum_i (2i - n + 1) * x_{(i)}
+    where x_{(i)} are the sorted ensemble members (0-indexed).
+    """
     target = target.unsqueeze(-1)
     diff_term = torch.abs(simulations - target).mean(dim=-1)
 
-    sims = simulations.unsqueeze(-1)
-    pairwise = torch.abs(sims - sims.transpose(-1, -2)).mean(dim=(-1, -2))
+    n = simulations.shape[-1]
+    sorted_sims, _ = torch.sort(simulations, dim=-1)
+    weights = (2.0 * torch.arange(n, device=simulations.device, dtype=simulations.dtype) - n + 1.0) / (n * n)
+    pairwise = 2.0 * (sorted_sims * weights).sum(dim=-1)
+
     return diff_term - 0.5 * pairwise
 
 
