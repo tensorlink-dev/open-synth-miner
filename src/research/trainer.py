@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 
 from src.models.factory import SynthModel
 from src.tracking.wandb_logger import log_experiment_results
-from .metrics import CRPSMultiIntervalScorer, crps_ensemble, log_likelihood
+from .metrics import CRPSMultiIntervalScorer, afcrps_ensemble, crps_ensemble, log_likelihood
 
 
 def prepare_paths_for_crps(paths: torch.Tensor) -> torch.Tensor:
@@ -80,12 +80,20 @@ class Trainer:
         *,
         device: Optional[torch.device] = None,
         adapter: Optional[DataToModelAdapter] = None,
+        crps_alpha: Optional[float] = 0.95,
     ) -> None:
         self.model = model
         self.optimizer = optimizer
         self.n_paths = n_paths
         self.device = device or next(model.parameters()).device
         self.adapter = adapter or DataToModelAdapter(self.device)
+        self.crps_alpha = crps_alpha
+
+    def _crps(self, simulations: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """Compute CRPS using the configured scoring rule."""
+        if self.crps_alpha is not None:
+            return afcrps_ensemble(simulations, target, alpha=self.crps_alpha)
+        return crps_ensemble(simulations, target)
 
     def train_step(self, batch: Dict[str, torch.Tensor]) -> Dict[str, float]:
         """Single training step handling shape and semantic adaptation."""
@@ -107,7 +115,7 @@ class Trainer:
         )
         # SynthModel.forward() enforces (batch, n_paths, horizon) shape for all head types
         sim_paths = prepare_paths_for_crps(paths)
-        crps = crps_ensemble(sim_paths, target)
+        crps = self._crps(sim_paths, target)
         loss = crps.mean()
         loss.backward()
         self.optimizer.step()
@@ -146,7 +154,7 @@ class Trainer:
             )
             # SynthModel.forward() enforces (batch, n_paths, horizon) shape for all head types
             sim_paths = prepare_paths_for_crps(paths)
-            crps = crps_ensemble(sim_paths, target)
+            crps = self._crps(sim_paths, target)
 
             total_loss += crps.mean().item()
             total_batches += 1
@@ -161,6 +169,7 @@ def train_step(
     optimizer: optim.Optimizer,
     horizon: int,
     n_paths: int,
+    crps_alpha: Optional[float] = 0.95,
 ) -> Dict[str, float]:
     model.train()
     optimizer.zero_grad()
@@ -171,7 +180,10 @@ def train_step(
 
     paths, mu, sigma = model(inputs, initial_price=initial_price, horizon=horizon, n_paths=n_paths)
     terminal_paths = paths[:, :, -1]
-    crps = crps_ensemble(terminal_paths, target)
+    if crps_alpha is not None:
+        crps = afcrps_ensemble(terminal_paths, target, alpha=crps_alpha)
+    else:
+        crps = crps_ensemble(terminal_paths, target)
     loss = crps.mean()
     loss.backward()
     optimizer.step()
@@ -194,6 +206,7 @@ def evaluate_and_log(
     n_paths: int,
     step: int,
     time_increment: int = 60,
+    crps_alpha: Optional[float] = 0.95,
 ) -> Dict[str, float]:
     model.eval()
     with torch.no_grad():
@@ -203,7 +216,10 @@ def evaluate_and_log(
         actual_series = batch.get("actual_series", None)
         paths, mu, sigma = model(inputs, initial_price=initial_price, horizon=horizon, n_paths=n_paths)
         terminal_paths = paths[:, :, -1]
-        crps = crps_ensemble(terminal_paths, target)
+        if crps_alpha is not None:
+            crps = afcrps_ensemble(terminal_paths, target, alpha=crps_alpha)
+        else:
+            crps = crps_ensemble(terminal_paths, target)
         sharpness = terminal_paths.std(dim=1).mean()
         loglik = log_likelihood(terminal_paths, target).mean()
 
