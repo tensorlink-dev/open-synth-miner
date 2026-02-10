@@ -25,6 +25,11 @@ from torch.utils.data import DataLoader, Dataset, Subset
 class FeatureEngineer(abc.ABC):
     """Abstract strategy for transforming raw prices into model tensors."""
 
+    @property
+    @abc.abstractmethod
+    def feature_dim(self) -> int:
+        """Return the number of features this engineer produces."""
+
     @abc.abstractmethod
     def prepare_cache(self, prices: np.ndarray) -> Any:
         """Pre-compute causal, leakage-safe artifacts for a full series."""
@@ -70,6 +75,11 @@ class ZScoreEngineer(FeatureEngineer):
         self.short_win = short_win
         self.long_win = long_win
 
+    @property
+    def feature_dim(self) -> int:
+        """Returns 3 features: returns, z_short, z_long."""
+        return 3
+
     def prepare_cache(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
         p = self.clean_prices(prices)
         log_prices = np.log(p + 1e-12)
@@ -114,6 +124,11 @@ class WaveletEngineer(FeatureEngineer):
     def __init__(self, wavelet: str = "db4", level: int = 4) -> None:
         self.wavelet = wavelet
         self.level = level
+
+    @property
+    def feature_dim(self) -> int:
+        """Returns 5 features: returns, approx, detail_L, detail_Lm1, detail_Lm2."""
+        return 5
 
     def prepare_cache(self, prices: np.ndarray) -> Dict[str, np.ndarray]:
         p = self.clean_prices(prices)
@@ -427,10 +442,13 @@ class MarketDataLoader:
     stride: Optional[int] = None
     sort_on_load: bool = True
     gap_handling: str = "error"
-    feature_dim: int = 3
-    stride: int = 1
+    feature_dim: Optional[int] = None
 
     def __post_init__(self) -> None:
+        # Auto-detect feature dimension from engineer if not explicitly provided
+        if self.feature_dim is None:
+            self.feature_dim = self.engineer.feature_dim
+
         self.assets_data = self.data_source.load_data(self.assets)
         if not self.assets_data:
             raise ValueError("Data source returned no assets")
@@ -445,11 +463,14 @@ class MarketDataLoader:
         if len(self.dataset) == 0:
             raise ValueError("No windows available for the requested input/prediction lengths")
 
+        # Validate that engineer's declared dimension matches actual output
         sample_inputs = self.dataset[0]["inputs"]
         inferred_dim = int(sample_inputs.shape[0])
         if inferred_dim != int(self.feature_dim):
             raise ValueError(
-                f"Feature dimension mismatch: expected {self.feature_dim}, engineer produced {inferred_dim}"
+                f"Feature dimension mismatch: engineer {self.engineer.__class__.__name__} "
+                f"declares feature_dim={self.feature_dim} but produces {inferred_dim} features. "
+                f"This indicates a bug in the engineer's feature_dim property."
             )
 
     # ----------------------------
@@ -960,6 +981,11 @@ class OHLCVEngineer(FeatureEngineer):
 
     def __init__(self, resample_rule: str = "5min") -> None:
         self.resample_rule = resample_rule
+
+    @property
+    def feature_dim(self) -> int:
+        """Returns 16 OHLCV micro-structure features."""
+        return 16
 
     # -- interface ---------------------------------------------------------
 
