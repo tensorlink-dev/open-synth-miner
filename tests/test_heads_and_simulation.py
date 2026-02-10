@@ -90,14 +90,24 @@ class TestHeadOutputShapes:
             assert sigma_seq.shape == (2, horizon)
             assert (sigma_seq > 0).all()
 
-    def test_clt_horizon_head_stochastic_variation(self):
-        """CLTHorizonHead per-step params should vary across steps (not constant)."""
+    def test_clt_horizon_head_deterministic(self):
+        """CLTHorizonHead should be deterministic (same input → same output)."""
         head = CLTHorizonHead(latent_size=64, hidden=64)
+        head.eval()
         h_t = torch.randn(2, 64)
-        mu_seq, sigma_seq = head(h_t, 60)
-        # With 60 steps the std across steps should be non-zero
-        assert mu_seq.std(dim=-1).mean() > 0, "Per-step mu should vary"
-        assert sigma_seq.std(dim=-1).mean() > 0, "Per-step sigma should vary"
+        mu1, sigma1 = head(h_t, 60)
+        mu2, sigma2 = head(h_t, 60)
+        assert torch.allclose(mu1, mu2), "Deterministic head should reproduce outputs"
+        assert torch.allclose(sigma1, sigma2), "Deterministic head should reproduce outputs"
+
+    def test_clt_horizon_head_n_basis(self):
+        """CLTHorizonHead should work with different n_basis values."""
+        h_t = torch.randn(2, 64)
+        for n_basis in [1, 4, 8]:
+            head = CLTHorizonHead(latent_size=64, n_basis=n_basis)
+            mu_seq, sigma_seq = head(h_t, 12)
+            assert mu_seq.shape == (2, 12)
+            assert (sigma_seq > 0).all()
 
     def test_clt_horizon_head_with_simulate_horizon_paths(self):
         """CLTHorizonHead outputs should be compatible with simulate_horizon_paths."""
