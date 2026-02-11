@@ -1323,6 +1323,171 @@ class HorizonHeadUnification(HeadBase):
 
 
 # ---------------------------------------------------------------------------
+# Gaussian Spectral Head (spectral basis → Gaussian simulation, no Student-t)
+# ---------------------------------------------------------------------------
+
+
+class GaussianSpectralHead(HeadBase):
+    """Spectral horizon head producing pure Gaussian parameters (mu, sigma).
+
+    Drops the Student-*t* degrees-of-freedom parameter entirely, routing
+    through :func:`simulate_horizon_paths` with ``N(0,1)`` innovations
+    instead of the heavier ``simulate_t_horizon_paths``.
+
+    Why Gaussian helps CRPS
+    -----------------------
+    The Student-*t* reparameterization ``t(nu) = Z / sqrt(V/nu)`` requires
+    sampling ``V ~ Gamma(nu/2)`` which injects high gradient variance and
+    gives the optimizer an extra free parameter (nu) that can fight mu/sigma
+    during early training.  Dropping nu removes this interaction term, so
+    the spectral basis only needs to learn smooth drift and volatility
+    curves — exactly the two quantities CRPS evaluates.
+
+    Architecture
+    ------------
+    Decomposes per-step ``(mu_t, sigma_t)`` into three additive paths:
+
+    1. **Static offset (DC)** — base value per parameter.
+    2. **Spectral path** — smooth deterministic curve from a **cosine-only**
+       basis (DCT-II style).  ``cos(0) = 1`` avoids boundary artefacts.
+    3. **Fractal path** — Brownian walk scaled by ``1 / sqrt(H)`` for
+       bounded endpoint variance.
+
+    Diagram::
+
+        h_t  (batch, d_model)
+              │
+              ▼
+        ┌────────────┐
+        │ LayerNorm  │
+        └─────┬──────┘
+              ▼
+        ┌────────────┐
+        │  Shared MLP│  (d_model → hidden → hidden)
+        └─────┬──────┘
+              │
+         ┌────┼────────────────────────────────┐
+         │    │                                 │
+         ▼    ▼                                 ▼
+      static  spectral_proj → cos basis     diffusion_proj
+      (B,2,1) (B, 2, K) @ cos(πkt)→(B,2,H) log_σ → BM (B,2,H)
+         │         │                            │
+         └────┬────┴────────────────────────────┘
+              ▼  element-wise sum
+         total_path  (B, 2, H)
+              │
+              ▼
+         mu, sigma (softplus + ε)
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    hidden_dim:
+        Hidden dimension of the shared MLP bottleneck.  Default: 64.
+    n_basis:
+        Number of cosine frequency components.  Default: 12.
+    mode:
+        One of ``'spectral'``, ``'fractal'``, or ``'hybrid'``.
+        Default: ``'hybrid'``.
+    """
+
+    _VALID_MODES = {"spectral", "fractal", "hybrid"}
+    _N_PARAMS = 2  # mu, sigma only — no nu
+
+    def __init__(
+        self,
+        latent_size: int,
+        hidden_dim: int = 64,
+        n_basis: int = 12,
+        mode: str = "hybrid",
+    ) -> None:
+        super().__init__()
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(self._VALID_MODES)}, got {mode!r}"
+            )
+        self.mode = mode
+        self.n_basis = n_basis
+        self.norm = nn.LayerNorm(latent_size)
+
+        # Shared feature extractor
+        self.net = nn.Sequential(
+            nn.Linear(latent_size, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        # 1. Static offset (DC component) for [mu, sigma]
+        self.static_proj = nn.Linear(hidden_dim, self._N_PARAMS)
+
+        # 2. Spectral weights: 2 params × K cosine basis
+        self.spectral_proj = nn.Linear(hidden_dim, self._N_PARAMS * n_basis)
+
+        # 3. Fractal diffusion rate for [mu, sigma]
+        self.diffusion_proj = nn.Linear(hidden_dim, self._N_PARAMS)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        horizon: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+        horizon : prediction length
+
+        Returns
+        -------
+        mu_seq : (batch, horizon) — per-step drift
+        sigma_seq : (batch, horizon) — per-step volatility (positive)
+        """
+        batch_size = h_t.shape[0]
+        device = h_t.device
+        feat = self.net(self.norm(h_t))
+
+        # DC offset — always present
+        base_params = self.static_proj(feat).unsqueeze(-1)  # (B, 2, 1)
+
+        # A. Spectral path (smooth deterministic curve)
+        if self.mode in ("spectral", "hybrid"):
+            t = torch.linspace(0, 1, horizon, device=device).view(1, 1, horizon)
+            k = torch.arange(
+                1, self.n_basis + 1, device=device, dtype=feat.dtype,
+            ).view(1, self.n_basis, 1)
+
+            weights = self.spectral_proj(feat).view(
+                batch_size, self._N_PARAMS, self.n_basis,
+            )  # (B, 2, K)
+            # Cosine-only basis (DCT-II style): stable at t=0
+            spec_path = (weights.unsqueeze(-1) * torch.cos(math.pi * k * t)).sum(
+                dim=2,
+            )  # (B, 2, H)
+        else:
+            spec_path = 0
+
+        # B. Fractal path (Brownian walk)
+        if self.mode in ("fractal", "hybrid"):
+            log_diffusion = self.diffusion_proj(feat).unsqueeze(-1)  # (B, 2, 1)
+            diffusion = torch.exp(log_diffusion)
+            raw_noise = torch.randn(batch_size, self._N_PARAMS, horizon, device=device)
+            fractal_path = (raw_noise * diffusion).cumsum(dim=-1) / math.sqrt(
+                max(horizon, 1)
+            )
+        else:
+            fractal_path = 0
+
+        # Assemble total path — (B, 2, H)
+        total_path = base_params + spec_path + fractal_path
+
+        mu_seq = total_path[:, 0, :]                              # (B, H)
+        sigma_seq = F.softplus(total_path[:, 1, :]) + 1e-6       # (B, H)
+
+        return mu_seq, sigma_seq
+
+
+# ---------------------------------------------------------------------------
 # Neural Bridge Head (hierarchical macro + micro texture)
 # ---------------------------------------------------------------------------
 
