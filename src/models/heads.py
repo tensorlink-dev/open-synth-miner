@@ -1124,6 +1124,11 @@ class HorizonHeadUnification(HeadBase):
         Number of cosine frequency components for the spectral path.
         Default: 12.  Higher values allow sharper temporal features but
         increase the risk of overfitting.
+    mode:
+        Default mode used when ``forward()`` is called without an
+        explicit ``mode`` argument.  One of ``'spectral'``, ``'fractal'``,
+        or ``'hybrid'``.  Default: ``'fractal'``.  Can still be overridden
+        per call via ``forward(..., mode='hybrid')``.
     """
 
     _VALID_MODES = {"spectral", "fractal", "hybrid"}
@@ -1133,8 +1138,14 @@ class HorizonHeadUnification(HeadBase):
         latent_size: int,
         hidden_dim: int = 64,
         n_basis: int = 12,
+        mode: str = "fractal",
     ) -> None:
         super().__init__()
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(self._VALID_MODES)}, got {mode!r}"
+            )
+        self.mode = mode
         self.n_basis = n_basis
         self.norm = nn.LayerNorm(latent_size)
 
@@ -1161,15 +1172,17 @@ class HorizonHeadUnification(HeadBase):
         self,
         h_t: torch.Tensor,
         horizon: int,
-        mode: str = "fractal",
+        mode: str | None = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Parameters
         ----------
         h_t : (batch, d_model) — last-step backbone embedding
         horizon : prediction length
-        mode : ``'spectral'``, ``'fractal'``, or ``'hybrid'``.
-            Controls which path components are active.
+        mode : ``'spectral'``, ``'fractal'``, or ``'hybrid'``, optional.
+            Controls which path components are active.  When ``None``
+            (the default), uses the mode set at construction time
+            (``self.mode``).
 
         Returns
         -------
@@ -1177,6 +1190,7 @@ class HorizonHeadUnification(HeadBase):
         sigma_seq : (batch, horizon) — per-step volatility (positive)
         nu_seq : (batch, horizon) — per-step degrees-of-freedom (in [2.1, 30.1])
         """
+        mode = mode or self.mode
         if mode not in self._VALID_MODES:
             raise ValueError(
                 f"mode must be one of {sorted(self._VALID_MODES)}, got {mode!r}"
