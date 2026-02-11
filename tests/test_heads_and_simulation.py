@@ -13,7 +13,8 @@ from src.models.factory import (
 )
 from src.models.heads import (
     GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
-    StudentTHorizonHead, ProbabilisticHorizonHead, NeuralBridgeHead, SDEHead,
+    StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
+    NeuralBridgeHead, SDEHead,
 )
 
 
@@ -328,6 +329,136 @@ class TestProbabilisticHorizonHead:
         assert torch.isfinite(mu_seq).all(), f"mu has non-finite values for mode={mode}"
         assert torch.isfinite(sigma_seq).all(), f"sigma has non-finite values for mode={mode}"
         assert torch.isfinite(nu_seq).all(), f"nu has non-finite values for mode={mode}"
+
+
+class TestHorizonHeadUnification:
+    """Tests for the three-way unified HorizonHeadUnification (spectral + fractal + DC)."""
+
+    @pytest.mark.parametrize("mode", ["spectral", "fractal", "hybrid"])
+    def test_output_shape(self, mode):
+        """All modes should return (mu_seq, sigma_seq, nu_seq) shaped (batch, horizon)."""
+        head = HorizonHeadUnification(latent_size=64, hidden_dim=32, n_basis=8)
+        h_t = torch.randn(4, 64)
+        mu_seq, sigma_seq, nu_seq = head(h_t, 60, mode=mode)
+
+        assert mu_seq.shape == (4, 60), f"mu shape mismatch for mode={mode}"
+        assert sigma_seq.shape == (4, 60), f"sigma shape mismatch for mode={mode}"
+        assert nu_seq.shape == (4, 60), f"nu shape mismatch for mode={mode}"
+        assert (sigma_seq > 0).all(), f"Sigma should be positive for mode={mode}"
+        assert (nu_seq >= 2.1).all(), f"Nu should be >= 2.1 for mode={mode}"
+        assert (nu_seq <= 30.1).all(), f"Nu should be <= 30.1 for mode={mode}"
+
+    @pytest.mark.parametrize("mode", ["spectral", "fractal", "hybrid"])
+    def test_different_horizons(self, mode):
+        """All modes should support arbitrary horizon lengths."""
+        head = HorizonHeadUnification(latent_size=32, n_basis=6)
+        h_t = torch.randn(2, 32)
+        for horizon in [1, 12, 48, 100]:
+            mu_seq, sigma_seq, nu_seq = head(h_t, horizon, mode=mode)
+            assert mu_seq.shape == (2, horizon)
+            assert sigma_seq.shape == (2, horizon)
+            assert nu_seq.shape == (2, horizon)
+            assert (sigma_seq > 0).all()
+
+    def test_spectral_is_deterministic(self):
+        """Spectral mode should be deterministic (same input -> same output)."""
+        head = HorizonHeadUnification(latent_size=32)
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, sig1, nu1 = head(h_t, 24, mode="spectral")
+        mu2, sig2, nu2 = head(h_t, 24, mode="spectral")
+        assert torch.allclose(mu1, mu2), "Spectral mode should be deterministic"
+        assert torch.allclose(sig1, sig2), "Spectral mode should be deterministic"
+        assert torch.allclose(nu1, nu2), "Spectral mode should be deterministic"
+
+    def test_fractal_is_stochastic(self):
+        """Fractal mode should produce different outputs across calls."""
+        head = HorizonHeadUnification(latent_size=32)
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _, _ = head(h_t, 24, mode="fractal")
+        mu2, _, _ = head(h_t, 24, mode="fractal")
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Fractal mode should be stochastic"
+
+    def test_hybrid_is_stochastic(self):
+        """Hybrid mode should be stochastic due to fractal component."""
+        head = HorizonHeadUnification(latent_size=32)
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _, _ = head(h_t, 24, mode="hybrid")
+        mu2, _, _ = head(h_t, 24, mode="hybrid")
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Hybrid mode should be stochastic"
+
+    def test_fractal_walk_smoothness(self):
+        """Fractal Brownian walk should produce temporally smooth trajectories."""
+        head = HorizonHeadUnification(latent_size=64)
+        h_t = torch.randn(4, 64)
+        mu_seq, _, _ = head(h_t, 60, mode="fractal")
+        mu_diffs = (mu_seq[:, 1:] - mu_seq[:, :-1]).abs().mean()
+        mu_range = mu_seq.max() - mu_seq.min() + 1e-8
+        assert mu_diffs / mu_range < 0.5, "Brownian walk should produce smooth trajectories"
+
+    def test_invalid_mode_raises(self):
+        """Invalid mode should raise ValueError."""
+        head = HorizonHeadUnification(latent_size=32)
+        h_t = torch.randn(2, 32)
+        with pytest.raises(ValueError, match="mode must be one of"):
+            head(h_t, 12, mode="invalid")
+
+    @pytest.mark.parametrize("n_basis", [1, 4, 12, 16])
+    def test_different_n_basis(self, n_basis):
+        """Spectral/hybrid modes should work with different n_basis values."""
+        head = HorizonHeadUnification(latent_size=32, n_basis=n_basis)
+        h_t = torch.randn(2, 32)
+        for mode in ["spectral", "hybrid"]:
+            mu_seq, sigma_seq, nu_seq = head(h_t, 12, mode=mode)
+            assert mu_seq.shape == (2, 12)
+            assert (sigma_seq > 0).all()
+
+    @pytest.mark.parametrize("mode", ["spectral", "fractal", "hybrid"])
+    def test_with_simulate_t_horizon_paths(self, mode):
+        """Outputs should be compatible with simulate_t_horizon_paths."""
+        head = HorizonHeadUnification(latent_size=64)
+        h_t = torch.randn(2, 64)
+        initial_price = torch.tensor([100.0, 200.0])
+        horizon = 12
+        n_paths = 50
+
+        mu_seq, sigma_seq, nu_seq = head(h_t, horizon, mode=mode)
+        paths = simulate_t_horizon_paths(initial_price, mu_seq, sigma_seq, nu_seq, n_paths)
+
+        assert paths.shape == (2, 50, 12), f"Expected (2, 50, 12), got {paths.shape}"
+        assert (paths > 0).all(), "Prices should be positive"
+        assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
+
+    @pytest.mark.parametrize("mode", ["spectral", "fractal", "hybrid"])
+    def test_numerical_stability(self, mode):
+        """Outputs should be finite for all modes with extreme inputs."""
+        head = HorizonHeadUnification(latent_size=64)
+        h_t = torch.randn(4, 64) * 10.0
+        mu_seq, sigma_seq, nu_seq = head(h_t, 48, mode=mode)
+        assert torch.isfinite(mu_seq).all(), f"mu has non-finite values for mode={mode}"
+        assert torch.isfinite(sigma_seq).all(), f"sigma has non-finite values for mode={mode}"
+        assert torch.isfinite(nu_seq).all(), f"nu has non-finite values for mode={mode}"
+
+    def test_mode_is_per_call(self):
+        """Same head instance should support different modes per forward call."""
+        head = HorizonHeadUnification(latent_size=32)
+        h_t = torch.randn(2, 32)
+        # All three modes should work on the same instance
+        mu_s, sig_s, nu_s = head(h_t, 12, mode="spectral")
+        mu_f, sig_f, nu_f = head(h_t, 12, mode="fractal")
+        mu_h, sig_h, nu_h = head(h_t, 12, mode="hybrid")
+        # All should have valid shapes
+        for mu in [mu_s, mu_f, mu_h]:
+            assert mu.shape == (2, 12)
+
+    def test_dc_offset_always_present(self):
+        """Static DC offset should contribute in all modes."""
+        head = HorizonHeadUnification(latent_size=32)
+        assert hasattr(head, "static_proj"), "Should have static_proj for DC offset"
+        assert hasattr(head, "spectral_proj"), "Should always have spectral_proj"
+        assert hasattr(head, "diffusion_proj"), "Should always have diffusion_proj"
 
 
 class TestSimulationFunctions:
