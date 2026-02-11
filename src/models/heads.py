@@ -833,14 +833,17 @@ class StudentTHorizonHead(HeadBase):
 
         # --- extract meta-parameters ---
         mu_mu = params[:, 0:1]
-        mu_logstd = params[:, 1:2].clamp(-5, 2)
+        # Clamp logstd then clamp exp() to prevent noise amplification at
+        # long horizons.  exp(0) = 1.0 caps the Brownian noise multiplier
+        # so that sigma stays bounded over 288+ steps.
+        mu_std = params[:, 1:2].clamp(-5, 0).exp()       # ≤ 1.0
 
         sig_mu = params[:, 2:3]
-        sig_logstd = params[:, 3:4].clamp(-5, 2)
+        sig_std = params[:, 3:4].clamp(-5, 0).exp()      # ≤ 1.0
 
         # nu: sigmoid → [2.1, 30.1]
         nu_mu = torch.sigmoid(params[:, 4:5]) * 28.0 + 2.1
-        nu_logstd = params[:, 5:6].clamp(-5, 1)
+        nu_std = params[:, 5:6].clamp(-5, 0).exp()       # ≤ 1.0
 
         # --- Brownian walk parameter paths ---
         # Scale by 1/sqrt(horizon) to keep total variance constant
@@ -848,15 +851,19 @@ class StudentTHorizonHead(HeadBase):
 
         # Drift path
         eps_mu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
-        mu_seq = mu_mu + mu_logstd.exp() * eps_mu  # (batch, horizon)
+        mu_seq = (mu_mu + mu_std * eps_mu).clamp(-4.0, 4.0)
 
-        # Volatility path (positive via softplus)
+        # Volatility path (positive via softplus, clamped pre-activation)
         eps_sig = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
-        sigma_seq = F.softplus(sig_mu + sig_logstd.exp() * eps_sig) + 1e-6
+        sigma_seq = F.softplus(
+            (sig_mu + sig_std * eps_sig).clamp(-4.0, 4.0)
+        ) + 1e-6
 
         # Degrees-of-freedom path (>2 for finite variance)
         eps_nu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
-        nu_seq = F.softplus(nu_mu + nu_logstd.exp() * eps_nu) + 2.0
+        nu_seq = F.softplus(
+            (nu_mu + nu_std * eps_nu).clamp(-4.0, 40.0)
+        ) + 2.0
 
         return mu_seq, sigma_seq, nu_seq
 
