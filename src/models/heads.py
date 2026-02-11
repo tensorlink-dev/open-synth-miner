@@ -862,12 +862,12 @@ class StudentTHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
-# Probabilistic Horizon Head (unified spectral / brownian / hybrid)
+# Probabilistic Horizon Head (unified spectral / brownian / hybrid / hybrid_ou)
 # ---------------------------------------------------------------------------
 
 
 class ProbabilisticHorizonHead(HeadBase):
-    """Unified head supporting three forecasting strategies via a mode switch.
+    """Unified head supporting multiple forecasting strategies via a mode switch.
 
     Returns per-step ``(mu_t, sigma_t, nu_t)`` trajectories using one of:
 
@@ -878,14 +878,22 @@ class ProbabilisticHorizonHead(HeadBase):
 
     2. **brownian** — Pure stochastic random-walk evolution.  Parameters
        evolve via cumulative Brownian noise, modelling regime shifts and
-       chaotic dynamics.  Forces the model to learn a posterior robust to
-       parameter drift.
+       chaotic dynamics.  Meta-stds are clamped and paths are bounded to
+       prevent the ``-0.5 * sigma^2`` drift term from collapsing prices
+       over long horizons.
 
-    3. **hybrid** — Spectral backbone with Brownian perturbations.  The
-       spectral basis captures the global (macro) trend while Brownian
-       residuals add local, high-frequency jitter.  This decomposes the
-       parameter space into *systematic drift* (spectral) and *local
-       diffusion* (Brownian).
+    3. **hybrid** — Spectral backbone with gated Brownian perturbations.
+       The spectral basis captures the global (macro) trend while Brownian
+       residuals add local, high-frequency jitter.  A learnable mixing gate
+       (initialized near zero) lets the model gradually introduce stochastic
+       variation as training stabilises.  Brownian centers are omitted in
+       this mode to prevent redundancy with spectral DC components.
+
+    4. **hybrid_ou** — Spectral backbone with mean-reverting Ornstein-
+       Uhlenbeck perturbations.  Like ``hybrid`` but the stochastic
+       component is an AR(1) process with a learned reversion coefficient
+       ``phi``.  The mean-reversion prevents parameter drift at long
+       horizons (H=288+), making this the most stable hybrid mode.
 
     All modes return three parameters per step—drift ``mu``, volatility
     ``sigma``, and Student-*t* degrees-of-freedom ``nu``—and are designed
@@ -904,13 +912,14 @@ class ProbabilisticHorizonHead(HeadBase):
         │  Shared MLP│  (d_model → hidden → hidden)
         └─────┬──────┘
               │
-         ┌────┴─────────────────────────────────────┐
-         │ (spectral / hybrid)                       │ (brownian / hybrid)
-         ▼                                           ▼
-      basis_weights → sin/cos expansion         param_proj → 6 meta-params
-      → spectral_path  (batch, 3, H)           → brownian_path  (batch, 3, H)
-         │                                           │
-         └──────────────┬────────────────────────────┘
+         ┌────┴──────────────────────────────────────────┐
+         │ (spectral / hybrid*)                           │ (brownian / hybrid*)
+         ▼                                                ▼
+      basis_weights → sin/cos expansion            param_proj → meta-params
+      → spectral_path  (batch, 3, H)              → stochastic_path (batch, 3, H)
+         │                                                │
+         │                                          [clamped, gated]
+         └──────────────┬─────────────────────────────────┘
                         ▼  element-wise sum
                    total_path  (batch, 3, H)
                         │
@@ -924,15 +933,18 @@ class ProbabilisticHorizonHead(HeadBase):
     hidden_dim:
         Hidden dimension of the shared MLP.  Default: 64.
     mode:
-        One of ``'spectral'``, ``'brownian'``, or ``'hybrid'``.
-        Default: ``'hybrid'``.
+        One of ``'spectral'``, ``'brownian'``, ``'hybrid'``, or
+        ``'hybrid_ou'``.  Default: ``'hybrid'``.
     n_basis:
         Number of Fourier frequency components for spectral / hybrid
         modes.  Each contributes sin *and* cos terms so total basis
         functions = ``2 * n_basis``.  Default: 8.
     """
 
-    _VALID_MODES = {"spectral", "brownian", "hybrid"}
+    _VALID_MODES = {"spectral", "brownian", "hybrid", "hybrid_ou"}
+    _SPECTRAL_MODES = {"spectral", "hybrid", "hybrid_ou"}
+    _STOCHASTIC_MODES = {"brownian", "hybrid", "hybrid_ou"}
+    _HYBRID_MODES = {"hybrid", "hybrid_ou"}
 
     def __init__(
         self,
@@ -957,13 +969,25 @@ class ProbabilisticHorizonHead(HeadBase):
             nn.Linear(hidden_dim, hidden_dim),
         )
 
-        if mode in ("spectral", "hybrid"):
+        if mode in self._SPECTRAL_MODES:
             # Learnable weights for 3 params (mu, sig, nu) × 2 (sin/cos) × n_basis
             self.basis_weights = nn.Linear(hidden_dim, 3 * 2 * n_basis)
 
-        if mode in ("brownian", "hybrid"):
+        if mode in self._STOCHASTIC_MODES:
             # Meta-stats: [mu_mu, mu_std, sig_mu, sig_std, nu_mu, nu_std]
             self.param_proj = nn.Linear(hidden_dim, 6)
+            # Zero-init bias to start with centered, low-variance paths
+            nn.init.zeros_(self.param_proj.bias)
+
+        if mode in self._HYBRID_MODES:
+            # Learnable mixing gate, initialized small so training starts ~spectral.
+            # sigmoid(-2.0) ≈ 0.12 — brownian contributes ~12% at init.
+            self.mix_logit = nn.Parameter(torch.tensor(-2.0))
+
+        if mode == "hybrid_ou":
+            # OU reversion coefficient phi = sigmoid(reversion_logit).
+            # sigmoid(3.0) ≈ 0.95 — moderate mean-reversion at init.
+            self.reversion_logit = nn.Parameter(torch.tensor(3.0))
 
     def _get_spectral_path(
         self, feat: torch.Tensor, horizon: int,
@@ -992,6 +1016,48 @@ class ProbabilisticHorizonHead(HeadBase):
         # Spectral path: (B, 3, 2*K) @ (2*K, H) → (B, 3, H)
         return coeffs @ basis
 
+    def _get_brownian_noise(
+        self, batch_size: int, horizon: int, device: torch.device,
+    ) -> torch.Tensor:
+        """Cumulative-sum Brownian noise scaled by ``1 / sqrt(H)``.
+
+        Returns
+        -------
+        noise : (batch, 3, horizon) with endpoint std ≈ 1.0
+        """
+        step_scale = 1.0 / math.sqrt(max(horizon, 1))
+        return (
+            torch.randn(batch_size, 3, horizon, device=device).cumsum(dim=-1)
+            * step_scale
+        )
+
+    def _get_ou_noise(
+        self, batch_size: int, horizon: int, device: torch.device, dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Ornstein-Uhlenbeck (AR(1)) noise with learned reversion speed.
+
+        Unlike pure Brownian, the OU process pulls noise back toward zero,
+        preventing parameter drift at long horizons.  Uses an explicit
+        scan for numerical stability across all ``phi`` values.
+
+        Returns
+        -------
+        ou_noise : (batch, 3, horizon)
+        """
+        phi = torch.sigmoid(self.reversion_logit)
+        step_scale = 1.0 / math.sqrt(max(horizon, 1))
+        eps = torch.randn(batch_size, 3, horizon, device=device) * step_scale
+
+        # AR(1) scan: x_t = phi * x_{t-1} + eps_t
+        # Unrolled to avoid O(H^2) memory from vectorized alternatives.
+        # H=288 × element-wise ops is fast on GPU.
+        x = torch.zeros(batch_size, 3, 1, device=device, dtype=dtype)
+        steps = []
+        for t in range(horizon):
+            x = phi * x + eps[:, :, t : t + 1]
+            steps.append(x)
+        return torch.cat(steps, dim=-1)  # (B, 3, H)
+
     def forward(
         self,
         h_t: torch.Tensor,
@@ -1014,28 +1080,44 @@ class ProbabilisticHorizonHead(HeadBase):
         batch_size = h_t.shape[0]
 
         # 1. Spectral component
-        if self.mode in ("spectral", "hybrid"):
+        if self.mode in self._SPECTRAL_MODES:
             spec_path = self._get_spectral_path(feat, horizon)
         else:
             spec_path = torch.zeros(batch_size, 3, horizon, device=h_t.device)
 
-        # 2. Brownian component
-        if self.mode in ("brownian", "hybrid"):
+        # 2. Stochastic component
+        if self.mode in self._STOCHASTIC_MODES:
             p = self.param_proj(feat)  # (batch, 6)
-            step_scale = 1.0 / math.sqrt(max(horizon, 1))
 
-            noise = (
-                torch.randn(batch_size, 3, horizon, device=h_t.device).cumsum(dim=-1)
-                * step_scale
-            )
-            # Scale noise by predicted meta-stds (indices 1, 3, 5)
-            stds = F.softplus(p[:, [1, 3, 5]]).unsqueeze(-1)  # (batch, 3, 1)
-            brownian_path = p[:, [0, 2, 4]].unsqueeze(-1) + stds * noise
+            # Build noise: Brownian or OU depending on mode
+            if self.mode == "hybrid_ou":
+                noise = self._get_ou_noise(batch_size, horizon, h_t.device, feat.dtype)
+            else:
+                noise = self._get_brownian_noise(batch_size, horizon, h_t.device)
+
+            # Clamp meta-stds to prevent sigma blow-up at long horizons.
+            # softplus ∈ (0, ∞) → clamp to (0, 1.0] keeps paths bounded.
+            stds = F.softplus(p[:, [1, 3, 5]]).clamp(max=1.0).unsqueeze(-1)
+
+            if self.mode == "brownian":
+                # Pure brownian: centers provide the DC level
+                centers = p[:, [0, 2, 4]].unsqueeze(-1)
+                stoch_path = (centers + stds * noise).clamp(-4.0, 4.0)
+            else:
+                # Hybrid modes: spectral handles DC, stochastic is perturbation only.
+                # Omitting centers prevents double-parameterization instability.
+                stoch_path = (stds * noise).clamp(-4.0, 4.0)
         else:
-            brownian_path = torch.zeros(batch_size, 3, horizon, device=h_t.device)
+            stoch_path = torch.zeros(batch_size, 3, horizon, device=h_t.device)
 
         # 3. Combine paths
-        total_path = spec_path + brownian_path  # (batch, 3, horizon)
+        if self.mode in self._HYBRID_MODES:
+            mix = torch.sigmoid(self.mix_logit)
+            total_path = spec_path + mix * stoch_path
+        elif self.mode == "brownian":
+            total_path = stoch_path
+        else:
+            total_path = spec_path
 
         # 4. Final parameter mapping
         mu_seq = total_path[:, 0, :]
