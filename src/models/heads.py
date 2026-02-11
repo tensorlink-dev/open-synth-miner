@@ -589,28 +589,33 @@ class SimpleHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
-# CLT Horizon Head (sample per-step params from learned hyperparameters)
+# CLT Horizon Head (spectral basis expansion for per-step parameters)
 # ---------------------------------------------------------------------------
 
 
 class CLTHorizonHead(HeadBase):
-    """CLT-inspired horizon head: samples per-step params from learned hyperparameters.
+    """CLT-inspired horizon head using spectral basis functions.
 
-    Uses the Central Limit Theorem intuition that per-step drift and volatility
-    are drawn from underlying distributions.  The head predicts four
-    hyperparameters — the mean and spread of the per-step drift distribution
-    and the location and spread of the per-step log-volatility distribution —
-    then samples per-step parameters via the reparameterization trick.
+    Produces per-step ``(mu_t, sigma_t)`` via a compact, **deterministic**
+    spectral decomposition.  The head predicts a global drift/volatility
+    centre plus sinusoidal modulation coefficients that shape smooth
+    temporal variation across the horizon.
 
-    This sits between:
+    Central Limit Theorem motivation: the per-step parameters are
+    modelled as deviations around population-level means ``mu_0`` and
+    ``sigma_0``.  The basis coefficients control how much each step is
+    allowed to deviate.  Because only low-frequency basis functions are
+    used, the resulting parameter trajectories are inherently smooth —
+    capturing regime drift and volatility clustering without overfitting
+    to per-step noise.
 
-    - **GBMHead**: constant ``(mu, sigma)`` across all steps (too rigid)
-    - **HorizonHead**: fully independent ``(mu_t, sigma_t)`` per step
-      (expensive, risk of overfitting)
+    Compared to the other horizon heads:
 
-    The double stochasticity (parameter sampling *then* path sampling) yields a
-    mixture-of-Gaussians distribution for log-returns at each step, producing
-    heavier tails that better match financial data.
+    - **GBMHead**: constant ``(mu, sigma)`` — no temporal variation.
+    - **SimpleHorizonHead**: per-step MLP — O(horizon × d_model²) compute.
+    - **HorizonHead**: cross-attention — O(horizon × seq_len × d_model).
+    - **CLTHorizonHead**: spectral basis — O(n_basis × horizon) matmul.
+      Cheapest deterministic head that can express smooth dynamics.
 
     Architecture::
 
@@ -625,16 +630,15 @@ class CLTHorizonHead(HeadBase):
         │  MLP       │  (d_model → hidden → hidden)
         └─────┬──────┘
               │
-         ┌────┴────────────┬──────────────┬──────────────┐
-         ▼                 ▼              ▼              ▼
-       μ_μ  (drift mean)  σ_μ (drift    μ_logσ (vol    σ_logσ (vol
-                           spread)       location)      spread)
-              │
-              ▼  reparameterized sampling  (× horizon)
-        ┌─────────────────────────────────────────┐
-        │ mu_t  = μ_μ + σ_μ · ε₁                 │
-        │ σ_t   = softplus(μ_logσ + σ_logσ · ε₂) │
-        └─────────────────────────────────────────┘
+         ┌────┴─────────────────────────┐
+         ▼                              ▼
+       μ₀, σ₀  (global centres)     α_k, β_k, γ_k, δ_k  (basis coefficients)
+              │                          │
+              │    ┌─────────────────────┘
+              │    │  sin/cos basis functions  B(t)
+              │    ▼
+              ▼  mu_t  = μ₀ + [α, β] · B(t)
+                 σ_t   = softplus(σ₀ + [γ, δ] · B(t))
               │
               ▼
         mu: (batch, horizon)   sigma: (batch, horizon)
@@ -645,10 +649,21 @@ class CLTHorizonHead(HeadBase):
         Must match the backbone ``d_model``.
     hidden:
         Hidden dimension of the shared MLP.  Default: 64.
+    n_basis:
+        Number of Fourier frequency components (each contributes a sin
+        *and* a cos term, so total basis functions = 2 × n_basis).
+        Default: 4.  Higher values allow sharper temporal changes but
+        increase parameter count and risk of overfitting.
     """
 
-    def __init__(self, latent_size: int, hidden: int = 64) -> None:
+    def __init__(
+        self,
+        latent_size: int,
+        hidden: int = 64,
+        n_basis: int = 4,
+    ) -> None:
         super().__init__()
+        self.n_basis = n_basis
         self.norm = nn.LayerNorm(latent_size)
         self.net = nn.Sequential(
             nn.Linear(latent_size, hidden),
@@ -656,11 +671,27 @@ class CLTHorizonHead(HeadBase):
             nn.Linear(hidden, hidden),
             nn.SiLU(),
         )
-        # Hyperparameter projections — 4 scalars per sample
-        self.mu_mu_proj = nn.Linear(hidden, 1)          # mean of per-step drifts
-        self.mu_spread_proj = nn.Linear(hidden, 1)      # spread of per-step drifts
-        self.sigma_loc_proj = nn.Linear(hidden, 1)      # location of per-step log-vol
-        self.sigma_spread_proj = nn.Linear(hidden, 1)   # spread of per-step log-vol
+        # Global centres
+        self.mu_center = nn.Linear(hidden, 1)
+        self.sigma_center = nn.Linear(hidden, 1)
+        # Spectral modulation coefficients (sin + cos for each frequency)
+        self.mu_basis_proj = nn.Linear(hidden, n_basis * 2)
+        self.sigma_basis_proj = nn.Linear(hidden, n_basis * 2)
+
+    def _build_basis(
+        self, horizon: int, device: torch.device,
+    ) -> torch.Tensor:
+        """Construct sinusoidal basis matrix.
+
+        Returns
+        -------
+        basis : (2 * n_basis, horizon)
+        """
+        t = torch.linspace(0.0, 1.0, horizon, device=device)  # (horizon,)
+        freqs = torch.arange(1, self.n_basis + 1, device=device, dtype=t.dtype)
+        # (n_basis, horizon) each
+        phase = 2.0 * math.pi * freqs.unsqueeze(1) * t.unsqueeze(0)
+        return torch.cat([torch.sin(phase), torch.cos(phase)], dim=0)
 
     def forward(
         self,
@@ -675,71 +706,55 @@ class CLTHorizonHead(HeadBase):
 
         Returns
         -------
-        mu_seq : (batch, horizon) — per-step drift (sampled)
-        sigma_seq : (batch, horizon) — per-step volatility (sampled, positive)
+        mu_seq : (batch, horizon) — per-step drift
+        sigma_seq : (batch, horizon) — per-step volatility (positive)
         """
-        batch = h_t.shape[0]
-        device = h_t.device
-
         h_t = self.norm(h_t)
         features = self.net(h_t)  # (batch, hidden)
 
-        # --- predict hyperparameters ---
-        mu_mu = self.mu_mu_proj(features).squeeze(-1)                              # (batch,)
-        mu_spread = F.softplus(self.mu_spread_proj(features).squeeze(-1)) + 1e-6   # (batch,)
-        sigma_loc = self.sigma_loc_proj(features).squeeze(-1)                      # (batch,)
-        sigma_spread = F.softplus(self.sigma_spread_proj(features).squeeze(-1)) + 1e-6  # (batch,)
+        # Global centres
+        mu_0 = self.mu_center(features)            # (batch, 1)
+        sigma_0 = self.sigma_center(features)      # (batch, 1)
 
-        # --- reparameterized sampling of per-step drift ---
-        # mu_t ~ N(mu_mu, mu_spread^2)
-        eps_mu = torch.randn(batch, horizon, device=device)
-        mu_seq = mu_mu.unsqueeze(-1) + mu_spread.unsqueeze(-1) * eps_mu  # (batch, horizon)
+        # Basis coefficients
+        mu_coeffs = self.mu_basis_proj(features)       # (batch, 2*n_basis)
+        sigma_coeffs = self.sigma_basis_proj(features)  # (batch, 2*n_basis)
 
-        # --- reparameterized sampling of per-step log-volatility ---
-        # log_sigma_t ~ N(sigma_loc, sigma_spread^2), then softplus for positivity
-        eps_sigma = torch.randn(batch, horizon, device=device)
-        log_sigma_seq = sigma_loc.unsqueeze(-1) + sigma_spread.unsqueeze(-1) * eps_sigma
-        sigma_seq = F.softplus(log_sigma_seq) + 1e-6  # (batch, horizon)
+        # Basis matrix — (2*n_basis, horizon)
+        basis = self._build_basis(horizon, h_t.device)
+
+        # Per-step parameters via spectral expansion
+        mu_seq = mu_0 + mu_coeffs @ basis              # (batch, horizon)
+        sigma_seq = F.softplus(
+            sigma_0 + sigma_coeffs @ basis
+        ) + 1e-6                                        # (batch, horizon)
 
         return mu_seq, sigma_seq
 
 
 # ---------------------------------------------------------------------------
-# Student-t CLT Horizon Head (fat-tailed per-step parameter sampling)
+# Student-t Brownian Walk Head (stochastic parameter paths + fat tails)
 # ---------------------------------------------------------------------------
 
 
 class StudentTHorizonHead(HeadBase):
-    """CLT horizon head with Student's *t*-distributed parameter sampling.
+    """Probabilistic horizon head with Brownian-walk parameter evolution.
 
-    Extends the :class:`CLTHorizonHead` idea by replacing Gaussian
-    parameter sampling with a location-scale Student's *t*-distribution.
-    This directly models fat tails: when the per-step variance is itself
-    stochastic (Inverse-Gamma), the marginal return distribution is
-    exactly Student's *t*.
+    Predicts **meta-parameters** (location and log-scale for drift,
+    volatility, and degrees-of-freedom), then generates per-step
+    parameter trajectories via cumulative-sum Brownian noise.  The
+    resulting smooth, autocorrelated parameter paths capture volatility
+    clustering and regime drift naturally.
 
-    The head predicts **six** hyperparameters per sample:
+    This is a *double-stochastic* model:
 
-    ========  =======================  ========================================
-    Symbol    Meaning                  Constraint
-    ========  =======================  ========================================
-    μ_μ       mean of per-step drifts  unconstrained
-    σ_μ       spread of drifts         softplus → positive
-    μ_logσ    location of log-vol      unconstrained
-    σ_logσ    spread of log-vol        softplus → positive
-    μ_ν       centre of d.o.f.         sigmoid → [2.1, 50]
-    σ_ν       spread of d.o.f.         softplus → positive
-    ========  =======================  ========================================
+    1. **Parameter paths** are sampled via Brownian walk in the head.
+    2. **Price paths** are sampled with Student-*t* innovations in the
+       simulator.
 
-    Per-step parameters are sampled via reparameterized *t*-noise::
-
-        Z ~ N(0,1),  V ~ Chi²(ν),  t_sample = Z / √(V/ν)
-        mu_t  = μ_μ  + σ_μ  · t_sample_1
-        σ_t   = softplus(μ_logσ + σ_logσ · t_sample_2)
-
-    Additionally, a per-step ``nu_t`` is returned so the **path simulator**
-    can draw innovations from ``StudentT(nu_t)`` instead of ``N(0,1)``,
-    giving fat-tailed *price* dynamics as well.
+    The ``1 / sqrt(horizon)`` noise scaling keeps total parameter
+    variance bounded regardless of horizon length.  Clamped log-scales
+    prevent explosion / collapse of the spread meta-parameters.
 
     Architecture::
 
@@ -751,15 +766,26 @@ class StudentTHorizonHead(HeadBase):
         └─────┬──────┘
               ▼
         ┌────────────┐
-        │    MLP     │
+        │  MLP       │  (d_model → hidden → hidden)
         └─────┬──────┘
               │
-         ┌────┴──────┬──────────┬──────────┬──────────┬──────────┐
-         ▼           ▼          ▼          ▼          ▼          ▼
-       μ_μ         σ_μ       μ_logσ     σ_logσ      μ_ν       σ_ν
+              ▼  Linear → 6 meta-params
+        ┌──────────────────────────────────────────┐
+        │ mu_mu, mu_logstd      (drift dist.)      │
+        │ sig_mu, sig_logstd    (volatility dist.)  │
+        │ nu_mu, nu_logstd      (d.o.f. dist.)      │
+        └──────────────┬───────────────────────────┘
+                       │
+                       ▼  Brownian walk sampling (× horizon)
+        ┌──────────────────────────────────────────┐
+        │ eps = randn().cumsum() / sqrt(H)         │
+        │ mu_t  = mu_mu + exp(mu_logstd) · eps     │
+        │ σ_t   = softplus(sig_mu + ...) + 1e-6    │
+        │ ν_t   = softplus(nu_mu + ...) + 2.0      │
+        └──────────────────────────────────────────┘
               │
-              ▼  reparameterized t-sampling  (× horizon)
-        mu_seq, sigma_seq, nu_seq
+              ▼
+        mu_seq, sigma_seq, nu_seq   (batch, horizon)
 
     Parameters
     ----------
@@ -767,68 +793,20 @@ class StudentTHorizonHead(HeadBase):
         Must match the backbone ``d_model``.
     hidden:
         Hidden dimension of the shared MLP.  Default: 64.
-    nu_min:
-        Minimum degrees-of-freedom (must be >2 for finite variance).
-        Default: 2.1.
-    nu_max:
-        Maximum degrees-of-freedom.  As ν → ∞ the *t* → Gaussian, so
-        this caps how "normal" the model can choose to be.  Default: 50.
     """
 
-    def __init__(
-        self,
-        latent_size: int,
-        hidden: int = 64,
-        nu_min: float = 2.1,
-        nu_max: float = 50.0,
-    ) -> None:
+    def __init__(self, latent_size: int, hidden: int = 64) -> None:
         super().__init__()
-        self.nu_min = nu_min
-        self.nu_range = nu_max - nu_min
-
         self.norm = nn.LayerNorm(latent_size)
         self.net = nn.Sequential(
             nn.Linear(latent_size, hidden),
-            nn.SiLU(),
+            nn.GELU(),
             nn.Linear(hidden, hidden),
-            nn.SiLU(),
+            nn.GELU(),
         )
-        # Drift hyper-parameters
-        self.mu_mu_proj = nn.Linear(hidden, 1)
-        self.mu_spread_proj = nn.Linear(hidden, 1)
-        # Volatility hyper-parameters
-        self.sigma_loc_proj = nn.Linear(hidden, 1)
-        self.sigma_spread_proj = nn.Linear(hidden, 1)
-        # Degrees-of-freedom hyper-parameters
-        self.nu_loc_proj = nn.Linear(hidden, 1)
-        self.nu_spread_proj = nn.Linear(hidden, 1)
+        # 6 meta-parameters: [mu_mu, mu_logstd, sig_mu, sig_logstd, nu_mu, nu_logstd]
+        self.param_proj = nn.Linear(hidden, 6)
 
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _reparam_t_sample(
-        loc: torch.Tensor,
-        scale: torch.Tensor,
-        nu: torch.Tensor,
-        shape: tuple,
-        device: torch.device,
-    ) -> torch.Tensor:
-        """Reparameterized location-scale Student-*t* sample.
-
-        ``t = loc + scale * (Z / sqrt(V / nu))``
-        where ``Z ~ N(0,1)`` and ``V ~ Chi²(nu)``.
-
-        Using the Gamma parameterisation of Chi² for differentiability:
-        ``Chi²(nu) = 2 · Gamma(nu/2, 1)`` → ``V/nu = Gamma(nu/2, 1) / (nu/2)``.
-        """
-        z = torch.randn(shape, device=device)
-        # Gamma(alpha=nu/2, beta=1) — torch uses (concentration, rate)
-        alpha = (nu / 2.0).unsqueeze(-1).expand(shape).clamp(min=0.5)
-        v = torch.distributions.Gamma(alpha, torch.ones_like(alpha)).rsample()
-        # v / (nu/2) ~ Chi²(nu) / nu
-        t_noise = z / (v / alpha + 1e-8).sqrt()
-        return loc.unsqueeze(-1) + scale.unsqueeze(-1) * t_noise
-
-    # ------------------------------------------------------------------
     def forward(
         self,
         h_t: torch.Tensor,
@@ -842,7 +820,7 @@ class StudentTHorizonHead(HeadBase):
 
         Returns
         -------
-        mu_seq : (batch, horizon) — per-step drift
+        mu_seq : (batch, horizon) — per-step drift (Brownian walk)
         sigma_seq : (batch, horizon) — per-step volatility (positive)
         nu_seq : (batch, horizon) — per-step degrees-of-freedom (>2)
         """
@@ -850,43 +828,35 @@ class StudentTHorizonHead(HeadBase):
         device = h_t.device
 
         h_t = self.norm(h_t)
-        features = self.net(h_t)  # (batch, hidden)
+        feat = self.net(h_t)
+        params = self.param_proj(feat)  # (batch, 6)
 
-        # --- drift hyper-parameters ---
-        mu_mu = self.mu_mu_proj(features).squeeze(-1)                              # (batch,)
-        mu_spread = F.softplus(self.mu_spread_proj(features).squeeze(-1)) + 1e-6
+        # --- extract meta-parameters ---
+        mu_mu = params[:, 0:1]
+        mu_logstd = params[:, 1:2].clamp(-5, 2)
 
-        # --- volatility hyper-parameters ---
-        sigma_loc = self.sigma_loc_proj(features).squeeze(-1)
-        sigma_spread = F.softplus(self.sigma_spread_proj(features).squeeze(-1)) + 1e-6
+        sig_mu = params[:, 2:3]
+        sig_logstd = params[:, 3:4].clamp(-5, 2)
 
-        # --- degrees-of-freedom hyper-parameters ---
-        # sigmoid → [0, 1] then scale to [nu_min, nu_max]
-        nu_loc = (
-            torch.sigmoid(self.nu_loc_proj(features).squeeze(-1))
-            * self.nu_range
-            + self.nu_min
-        )  # (batch,)
-        nu_spread = F.softplus(self.nu_spread_proj(features).squeeze(-1)) + 1e-6
+        # nu: sigmoid → [2.1, 30.1]
+        nu_mu = torch.sigmoid(params[:, 4:5]) * 28.0 + 2.1
+        nu_logstd = params[:, 5:6].clamp(-5, 1)
 
-        sample_shape = (batch, horizon)
+        # --- Brownian walk parameter paths ---
+        # Scale by 1/sqrt(horizon) to keep total variance constant
+        step_scale = 1.0 / math.sqrt(max(horizon, 1))
 
-        # --- sample per-step drift from t(mu_mu, mu_spread, nu_loc) ---
-        mu_seq = self._reparam_t_sample(
-            mu_mu, mu_spread, nu_loc, sample_shape, device,
-        )  # (batch, horizon)
+        # Drift path
+        eps_mu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        mu_seq = mu_mu + mu_logstd.exp() * eps_mu  # (batch, horizon)
 
-        # --- sample per-step log-volatility from t(sigma_loc, sigma_spread, nu_loc) ---
-        log_sigma_seq = self._reparam_t_sample(
-            sigma_loc, sigma_spread, nu_loc, sample_shape, device,
-        )
-        sigma_seq = F.softplus(log_sigma_seq) + 1e-6  # (batch, horizon)
+        # Volatility path (positive via softplus)
+        eps_sig = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        sigma_seq = F.softplus(sig_mu + sig_logstd.exp() * eps_sig) + 1e-6
 
-        # --- sample per-step nu ---
-        eps_nu = torch.randn(batch, horizon, device=device)
-        nu_seq = F.softplus(
-            nu_loc.unsqueeze(-1) + nu_spread.unsqueeze(-1) * eps_nu
-        ) + self.nu_min  # (batch, horizon), always > nu_min
+        # Degrees-of-freedom path (>2 for finite variance)
+        eps_nu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        nu_seq = F.softplus(nu_mu + nu_logstd.exp() * eps_nu) + 2.0
 
         return mu_seq, sigma_seq, nu_seq
 
