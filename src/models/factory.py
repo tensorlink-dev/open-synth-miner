@@ -21,8 +21,8 @@ from omegaconf import DictConfig, OmegaConf
 from .backbones import BackboneBase, BlockBase
 from .heads import (
     GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
-    StudentTHorizonHead, ProbabilisticHorizonHead, NeuralBridgeHead,
-    NeuralSDEHead, SDEHead, HeadBase,
+    StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
+    NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase,
 )
 from .registry import discover_components
 
@@ -316,7 +316,7 @@ class SynthModel(nn.Module):
                 initial_price, micro_returns, sigma, n_paths, dt,
             )
             return paths, macro_ret.squeeze(-1), sigma
-        elif isinstance(self.head, (StudentTHorizonHead, ProbabilisticHorizonHead)):
+        elif isinstance(self.head, (StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification)):
             h_t = self.backbone(x)
             mu_seq, sigma_seq, nu_seq = self.head(h_t, horizon)
             if apply_revin_denorm and self._revin_layers:
@@ -596,6 +596,7 @@ HEAD_REGISTRY = {
     "clt_horizon": CLTHorizonHead,
     "student_t_horizon": StudentTHorizonHead,
     "probabilistic_horizon": ProbabilisticHorizonHead,
+    "horizon_unification": HorizonHeadUnification,
     "neural_bridge": NeuralBridgeHead,
 }
 

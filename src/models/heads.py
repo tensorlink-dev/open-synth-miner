@@ -1136,6 +1136,193 @@ class ProbabilisticHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
+# Three-Way Unified Horizon Head (spectral + fractal + static DC)
+# ---------------------------------------------------------------------------
+
+
+class HorizonHeadUnification(HeadBase):
+    """Three-way unified horizon head using residual decomposition.
+
+    Decomposes per-step parameter trajectories into three additive components:
+
+    1. **Static offset (DC component)** — A learned base value for each
+       parameter (mu, sigma, nu).  This is the "average" prediction; the
+       other two paths only need to model *deviations* from it.
+
+    2. **Spectral path (global trend)** — A smooth, deterministic curve
+       built from a **cosine-only** Fourier basis (DCT-II style).  Cosine
+       functions satisfy ``cos(0) = 1``, giving better boundary conditions
+       at ``t = 0`` than mixed sin/cos bases and avoiding spectral ringing
+       on fixed horizons.
+
+    3. **Fractal path (local innovation)** — A Brownian-walk random process
+       whose volatility is controlled by a single learned *diffusion rate*
+       per parameter.  The cumulative noise is scaled by
+       ``1 / sqrt(horizon)`` to keep endpoint variance bounded regardless
+       of horizon length.
+
+    The ``mode`` argument (set per forward call) selects which components
+    are active:
+
+    - ``'spectral'`` — static + spectral only (deterministic).
+    - ``'fractal'`` — static + fractal only (stochastic, no global trend).
+    - ``'hybrid'`` — static + spectral + fractal (full decomposition).
+
+    This residual design prevents the common failure modes of pure spectral
+    or pure i.i.d. noise heads:
+
+    - The DC offset means the spectral/fractal paths start near zero, so
+      there is no need to "invent" the base parameter at every step.
+    - The cosine-only basis avoids the boundary artefacts of sin functions.
+    - The diffusion bottleneck restricts stochasticity to a single learnable
+      scalar per parameter, keeping gradient variance manageable.
+
+    Architecture::
+
+        h_t  (batch, d_model)
+              │
+              ▼
+        ┌────────────┐
+        │ LayerNorm  │
+        └─────┬──────┘
+              ▼
+        ┌────────────┐
+        │  Shared MLP│  (d_model → hidden → hidden)
+        └─────┬──────┘
+              │
+         ┌────┼────────────────────────────────────┐
+         │    │                                     │
+         ▼    ▼                                     ▼
+      static  spectral_proj → cos basis         diffusion_proj
+      (B,3,1) (B, 3, K) @ cos(πkt) → (B,3,H)  log_σ → Brownian (B,3,H)
+         │         │                                │
+         └────┬────┴────────────────────────────────┘
+              ▼  element-wise sum
+         total_path  (B, 3, H)
+              │
+              ▼
+         mu, sigma (softplus), nu (sigmoid → [2.1, 30.1])
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    hidden_dim:
+        Hidden dimension of the shared MLP bottleneck.  Default: 64.
+    n_basis:
+        Number of cosine frequency components for the spectral path.
+        Default: 12.  Higher values allow sharper temporal features but
+        increase the risk of overfitting.
+    """
+
+    _VALID_MODES = {"spectral", "fractal", "hybrid"}
+
+    def __init__(
+        self,
+        latent_size: int,
+        hidden_dim: int = 64,
+        n_basis: int = 12,
+    ) -> None:
+        super().__init__()
+        self.n_basis = n_basis
+        self.norm = nn.LayerNorm(latent_size)
+
+        # Shared Latent Bottleneck
+        self.net = nn.Sequential(
+            nn.Linear(latent_size, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        # 1. Spectral Weights (Deterministic Backbone)
+        #    3 parameters (mu, sigma, nu) × K cosine basis functions
+        self.spectral_proj = nn.Linear(hidden_dim, 3 * n_basis)
+
+        # 2. Brownian Meta-Params (Stochastic Innovations)
+        #    Predicts log-diffusion rate for [mu, sigma, nu]
+        self.diffusion_proj = nn.Linear(hidden_dim, 3)
+
+        # 3. Static Offset (The "DC" component)
+        #    Base value for [mu, sigma, nu]
+        self.static_proj = nn.Linear(hidden_dim, 3)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        horizon: int,
+        mode: str = "fractal",
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+        horizon : prediction length
+        mode : ``'spectral'``, ``'fractal'``, or ``'hybrid'``.
+            Controls which path components are active.
+
+        Returns
+        -------
+        mu_seq : (batch, horizon) — per-step drift
+        sigma_seq : (batch, horizon) — per-step volatility (positive)
+        nu_seq : (batch, horizon) — per-step degrees-of-freedom (in [2.1, 30.1])
+        """
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(self._VALID_MODES)}, got {mode!r}"
+            )
+
+        batch_size = h_t.shape[0]
+        device = h_t.device
+        feat = self.net(self.norm(h_t))
+
+        # Base parameters (The starting point for the horizon)
+        base_params = self.static_proj(feat).unsqueeze(-1)  # (B, 3, 1)
+
+        # --- PATH GENERATION ---
+
+        # A. Spectral Path (Global smooth curve)
+        if mode in ("spectral", "hybrid"):
+            t = torch.linspace(0, 1, horizon, device=device).view(1, 1, horizon)
+            k = torch.arange(1, self.n_basis + 1, device=device, dtype=feat.dtype).view(
+                1, self.n_basis, 1
+            )
+
+            # (B, 3, K)
+            weights = self.spectral_proj(feat).view(batch_size, 3, self.n_basis)
+            # Cosine-only basis (DCT-II style) for stable boundary at t=0
+            spec_path = (weights.unsqueeze(-1) * torch.cos(math.pi * k * t)).sum(dim=2)
+        else:
+            spec_path = 0
+
+        # B. Fractal Path (Brownian Walk)
+        if mode in ("fractal", "hybrid"):
+            # Predict the "volatility of the parameters"
+            log_diffusion = self.diffusion_proj(feat).unsqueeze(-1)  # (B, 3, 1)
+            diffusion = torch.exp(log_diffusion)
+
+            # Cumulative sum of white noise = Brownian Motion
+            # Scaled by 1/sqrt(H) to keep the endpoint variance bounded
+            raw_noise = torch.randn(batch_size, 3, horizon, device=device)
+            fractal_path = (raw_noise * diffusion).cumsum(dim=-1) / math.sqrt(
+                max(horizon, 1)
+            )
+        else:
+            fractal_path = 0
+
+        # --- FINAL ASSEMBLY ---
+        # total_path shape: (Batch, 3, Horizon)
+        total_path = base_params + spec_path + fractal_path
+
+        mu_seq = total_path[:, 0, :]
+        # Softplus + epsilon to keep sigma strictly positive
+        sig_seq = F.softplus(total_path[:, 1, :]) + 1e-6
+        # Map third dimension to Nu [2.1, 30.1]
+        nu_seq = torch.sigmoid(total_path[:, 2, :]) * 28.0 + 2.1
+
+        return mu_seq, sig_seq, nu_seq
+
+
+# ---------------------------------------------------------------------------
 # Neural Bridge Head (hierarchical macro + micro texture)
 # ---------------------------------------------------------------------------
 
