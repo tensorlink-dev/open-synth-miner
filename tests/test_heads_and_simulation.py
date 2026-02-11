@@ -14,6 +14,7 @@ from src.models.factory import (
 from src.models.heads import (
     GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
     StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
+    GaussianSpectralHead,
     NeuralBridgeHead, SDEHead,
 )
 
@@ -512,6 +513,167 @@ class TestHorizonHeadUnification:
         assert hasattr(head, "static_proj"), "Should have static_proj for DC offset"
         assert hasattr(head, "spectral_proj"), "Should always have spectral_proj"
         assert hasattr(head, "diffusion_proj"), "Should always have diffusion_proj"
+
+
+class TestGaussianSpectralHead:
+    """Tests for the Gaussian spectral head (spectral basis → Gaussian simulation)."""
+
+    ALL_MODES = ["spectral", "fractal", "hybrid"]
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_output_shape(self, mode):
+        """All modes should return (mu_seq, sigma_seq) shaped (batch, horizon)."""
+        head = GaussianSpectralHead(latent_size=64, hidden_dim=32, mode=mode)
+        h_t = torch.randn(4, 64)
+        mu_seq, sigma_seq = head(h_t, 60)
+
+        assert mu_seq.shape == (4, 60), f"mu shape mismatch for mode={mode}"
+        assert sigma_seq.shape == (4, 60), f"sigma shape mismatch for mode={mode}"
+        assert (sigma_seq > 0).all(), f"Sigma should be positive for mode={mode}"
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_returns_two_values_not_three(self, mode):
+        """GaussianSpectralHead should return exactly 2 values (no nu)."""
+        head = GaussianSpectralHead(latent_size=32, mode=mode)
+        h_t = torch.randn(2, 32)
+        result = head(h_t, 12)
+        assert len(result) == 2, f"Expected 2 return values (mu, sigma), got {len(result)}"
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_different_horizons(self, mode):
+        """All modes should support arbitrary horizon lengths."""
+        head = GaussianSpectralHead(latent_size=32, mode=mode)
+        h_t = torch.randn(2, 32)
+        for horizon in [1, 12, 48, 100, 288]:
+            mu_seq, sigma_seq = head(h_t, horizon)
+            assert mu_seq.shape == (2, horizon)
+            assert sigma_seq.shape == (2, horizon)
+            assert (sigma_seq > 0).all()
+
+    def test_spectral_is_deterministic(self):
+        """Spectral mode should be deterministic (same input -> same output)."""
+        head = GaussianSpectralHead(latent_size=32, mode="spectral")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, sig1 = head(h_t, 24)
+        mu2, sig2 = head(h_t, 24)
+        assert torch.allclose(mu1, mu2), "Spectral mode should be deterministic"
+        assert torch.allclose(sig1, sig2), "Spectral mode should be deterministic"
+
+    def test_fractal_is_stochastic(self):
+        """Fractal mode should produce different outputs across calls."""
+        head = GaussianSpectralHead(latent_size=32, mode="fractal")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _ = head(h_t, 24)
+        mu2, _ = head(h_t, 24)
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Fractal mode should be stochastic"
+
+    def test_hybrid_is_stochastic(self):
+        """Hybrid mode should be stochastic due to fractal component."""
+        head = GaussianSpectralHead(latent_size=32, mode="hybrid")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _ = head(h_t, 24)
+        mu2, _ = head(h_t, 24)
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Hybrid mode should be stochastic"
+
+    def test_fractal_walk_smoothness(self):
+        """Fractal Brownian walk should produce temporally smooth trajectories."""
+        head = GaussianSpectralHead(latent_size=64, mode="fractal")
+        h_t = torch.randn(4, 64)
+        mu_seq, _ = head(h_t, 60)
+        mu_diffs = (mu_seq[:, 1:] - mu_seq[:, :-1]).abs().mean()
+        mu_range = mu_seq.max() - mu_seq.min() + 1e-8
+        assert mu_diffs / mu_range < 0.5, "Brownian walk should produce smooth trajectories"
+
+    def test_invalid_mode_raises(self):
+        """Invalid mode should raise ValueError."""
+        with pytest.raises(ValueError, match="mode must be one of"):
+            GaussianSpectralHead(latent_size=32, mode="invalid")
+
+    @pytest.mark.parametrize("n_basis", [1, 4, 12, 16])
+    def test_different_n_basis(self, n_basis):
+        """Spectral/hybrid modes should work with different n_basis values."""
+        for mode in ["spectral", "hybrid"]:
+            head = GaussianSpectralHead(latent_size=32, n_basis=n_basis, mode=mode)
+            h_t = torch.randn(2, 32)
+            mu_seq, sigma_seq = head(h_t, 12)
+            assert mu_seq.shape == (2, 12)
+            assert (sigma_seq > 0).all()
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_with_simulate_horizon_paths(self, mode):
+        """Outputs should be compatible with simulate_horizon_paths (Gaussian)."""
+        head = GaussianSpectralHead(latent_size=64, mode=mode)
+        h_t = torch.randn(2, 64)
+        initial_price = torch.tensor([100.0, 200.0])
+        horizon = 12
+        n_paths = 50
+
+        mu_seq, sigma_seq = head(h_t, horizon)
+        paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths)
+
+        assert paths.shape == (2, 50, 12), f"Expected (2, 50, 12), got {paths.shape}"
+        assert (paths > 0).all(), "Prices should be positive"
+        assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_numerical_stability(self, mode):
+        """Outputs should be finite for all modes with extreme inputs."""
+        head = GaussianSpectralHead(latent_size=64, mode=mode)
+        h_t = torch.randn(4, 64) * 10.0
+        mu_seq, sigma_seq = head(h_t, 48)
+        assert torch.isfinite(mu_seq).all(), f"mu has non-finite values for mode={mode}"
+        assert torch.isfinite(sigma_seq).all(), f"sigma has non-finite values for mode={mode}"
+
+    @pytest.mark.parametrize("mode", ALL_MODES)
+    def test_long_horizon_288_stability(self, mode):
+        """All modes should produce bounded sigma at H=288 (24h @ 5min)."""
+        head = GaussianSpectralHead(latent_size=64, mode=mode)
+        h_t = torch.randn(4, 64)
+        mu_seq, sigma_seq = head(h_t, 288)
+
+        assert sigma_seq.shape == (4, 288)
+        assert torch.isfinite(sigma_seq).all(), f"sigma not finite for mode={mode} at H=288"
+        assert (sigma_seq > 0).all(), f"sigma not positive for mode={mode} at H=288"
+        assert sigma_seq.max() < 10.0, (
+            f"sigma too large for mode={mode} at H=288: max={sigma_seq.max():.2f}"
+        )
+
+    def test_has_no_nu_related_params(self):
+        """GaussianSpectralHead should have no nu-related projections."""
+        head = GaussianSpectralHead(latent_size=32)
+        assert hasattr(head, "static_proj"), "Should have static_proj for DC offset"
+        assert hasattr(head, "spectral_proj"), "Should have spectral_proj"
+        assert hasattr(head, "diffusion_proj"), "Should have diffusion_proj"
+        # static_proj output should be 2 (mu, sigma), not 3
+        assert head.static_proj.out_features == 2
+        assert head.diffusion_proj.out_features == 2
+
+    def test_dc_offset_always_present(self):
+        """Static DC offset should contribute in all modes."""
+        head = GaussianSpectralHead(latent_size=32, mode="spectral")
+        h_t = torch.randn(2, 32)
+        # Zero out spectral weights to isolate DC offset
+        with torch.no_grad():
+            head.spectral_proj.weight.fill_(0.0)
+            head.spectral_proj.bias.fill_(0.0)
+        mu_seq, sigma_seq = head(h_t, 12)
+        # With spectral zeroed, each step should be identical (only DC)
+        assert torch.allclose(mu_seq[:, 0:1].expand_as(mu_seq), mu_seq, atol=1e-5), \
+            "With spectral zeroed, mu should be constant (DC only)"
+
+    def test_gradient_flows(self):
+        """Gradients should flow through all parameters."""
+        head = GaussianSpectralHead(latent_size=32, mode="hybrid")
+        h_t = torch.randn(2, 32, requires_grad=True)
+        mu_seq, sigma_seq = head(h_t, 12)
+        loss = mu_seq.sum() + sigma_seq.sum()
+        loss.backward()
+        assert h_t.grad is not None, "Gradient should flow to input"
+        for name, param in head.named_parameters():
+            assert param.grad is not None, f"No gradient for {name}"
 
 
 class TestSimulationFunctions:

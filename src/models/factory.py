@@ -22,6 +22,7 @@ from .backbones import BackboneBase, BlockBase
 from .heads import (
     GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
     StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
+    GaussianSpectralHead,
     NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase,
 )
 from .registry import discover_components
@@ -325,7 +326,7 @@ class SynthModel(nn.Module):
                 initial_price, mu_seq, sigma_seq, nu_seq, n_paths, dt,
             )
             return paths, mu_seq, sigma_seq
-        elif isinstance(self.head, CLTHorizonHead):
+        elif isinstance(self.head, (CLTHorizonHead, GaussianSpectralHead)):
             h_t = self.backbone(x)
             mu_seq, sigma_seq = self.head(h_t, horizon)
             if apply_revin_denorm and self._revin_layers:
@@ -597,6 +598,7 @@ HEAD_REGISTRY = {
     "student_t_horizon": StudentTHorizonHead,
     "probabilistic_horizon": ProbabilisticHorizonHead,
     "horizon_unification": HorizonHeadUnification,
+    "gaussian_spectral": GaussianSpectralHead,
     "neural_bridge": NeuralBridgeHead,
 }
 
