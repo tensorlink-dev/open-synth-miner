@@ -733,24 +733,28 @@ class CLTHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
-# Student-t CLT Horizon Head (spectral basis + fat-tailed path innovations)
+# Student-t Brownian Walk Head (stochastic parameter paths + fat tails)
 # ---------------------------------------------------------------------------
 
 
 class StudentTHorizonHead(HeadBase):
-    """Spectral basis horizon head with learnable degrees-of-freedom.
+    """Probabilistic horizon head with Brownian-walk parameter evolution.
 
-    Extends :class:`CLTHorizonHead` by adding a per-step ``nu_t``
-    (degrees-of-freedom) output that controls how fat-tailed the path
-    innovations are at each step.  Drift and volatility are constructed
-    deterministically via the same spectral basis expansion; only the
-    **path simulator** introduces stochasticity (via Student-*t*
-    innovations drawn from ``t(nu_t)``).
+    Predicts **meta-parameters** (location and log-scale for drift,
+    volatility, and degrees-of-freedom), then generates per-step
+    parameter trajectories via cumulative-sum Brownian noise.  The
+    resulting smooth, autocorrelated parameter paths capture volatility
+    clustering and regime drift naturally.
 
-    This keeps a single stochastic layer (path sampling) while giving
-    the model the ability to predict *when* extreme moves are likely
-    (low ``nu_t`` → heavy tails) vs calm periods (high ``nu_t`` ≈
-    Gaussian).
+    This is a *double-stochastic* model:
+
+    1. **Parameter paths** are sampled via Brownian walk in the head.
+    2. **Price paths** are sampled with Student-*t* innovations in the
+       simulator.
+
+    The ``1 / sqrt(horizon)`` noise scaling keeps total parameter
+    variance bounded regardless of horizon length.  Clamped log-scales
+    prevent explosion / collapse of the spread meta-parameters.
 
     Architecture::
 
@@ -762,17 +766,26 @@ class StudentTHorizonHead(HeadBase):
         └─────┬──────┘
               ▼
         ┌────────────┐
-        │    MLP     │
+        │  MLP       │  (d_model → hidden → hidden)
         └─────┬──────┘
               │
-         ┌────┴────────────────┬──────────────────┐
-         ▼                     ▼                   ▼
-       μ₀, σ₀, ν₀           basis coeffs        ν basis coeffs
-       (global centres)      (mu & sigma)        (degrees-of-freedom)
-              │                     │                   │
-              └──── spectral basis ─┴───────────────────┘
+              ▼  Linear → 6 meta-params
+        ┌──────────────────────────────────────────┐
+        │ mu_mu, mu_logstd      (drift dist.)      │
+        │ sig_mu, sig_logstd    (volatility dist.)  │
+        │ nu_mu, nu_logstd      (d.o.f. dist.)      │
+        └──────────────┬───────────────────────────┘
+                       │
+                       ▼  Brownian walk sampling (× horizon)
+        ┌──────────────────────────────────────────┐
+        │ eps = randn().cumsum() / sqrt(H)         │
+        │ mu_t  = mu_mu + exp(mu_logstd) · eps     │
+        │ σ_t   = softplus(sig_mu + ...) + 1e-6    │
+        │ ν_t   = softplus(nu_mu + ...) + 2.0      │
+        └──────────────────────────────────────────┘
+              │
               ▼
-        mu_seq, sigma_seq, nu_seq   (all deterministic)
+        mu_seq, sigma_seq, nu_seq   (batch, horizon)
 
     Parameters
     ----------
@@ -780,52 +793,19 @@ class StudentTHorizonHead(HeadBase):
         Must match the backbone ``d_model``.
     hidden:
         Hidden dimension of the shared MLP.  Default: 64.
-    n_basis:
-        Number of Fourier frequency components.  Default: 4.
-    nu_min:
-        Minimum degrees-of-freedom (must be >2 for finite variance).
-        Default: 2.1.
-    nu_max:
-        Maximum degrees-of-freedom.  Default: 50.
     """
 
-    def __init__(
-        self,
-        latent_size: int,
-        hidden: int = 64,
-        n_basis: int = 4,
-        nu_min: float = 2.1,
-        nu_max: float = 50.0,
-    ) -> None:
+    def __init__(self, latent_size: int, hidden: int = 64) -> None:
         super().__init__()
-        self.n_basis = n_basis
-        self.nu_min = nu_min
-        self.nu_range = nu_max - nu_min
-
         self.norm = nn.LayerNorm(latent_size)
         self.net = nn.Sequential(
             nn.Linear(latent_size, hidden),
-            nn.SiLU(),
+            nn.GELU(),
             nn.Linear(hidden, hidden),
-            nn.SiLU(),
+            nn.GELU(),
         )
-        # Global centres
-        self.mu_center = nn.Linear(hidden, 1)
-        self.sigma_center = nn.Linear(hidden, 1)
-        self.nu_center = nn.Linear(hidden, 1)
-        # Spectral modulation coefficients
-        self.mu_basis_proj = nn.Linear(hidden, n_basis * 2)
-        self.sigma_basis_proj = nn.Linear(hidden, n_basis * 2)
-        self.nu_basis_proj = nn.Linear(hidden, n_basis * 2)
-
-    def _build_basis(
-        self, horizon: int, device: torch.device,
-    ) -> torch.Tensor:
-        """Construct sinusoidal basis matrix.  (2 * n_basis, horizon)"""
-        t = torch.linspace(0.0, 1.0, horizon, device=device)
-        freqs = torch.arange(1, self.n_basis + 1, device=device, dtype=t.dtype)
-        phase = 2.0 * math.pi * freqs.unsqueeze(1) * t.unsqueeze(0)
-        return torch.cat([torch.sin(phase), torch.cos(phase)], dim=0)
+        # 6 meta-parameters: [mu_mu, mu_logstd, sig_mu, sig_logstd, nu_mu, nu_logstd]
+        self.param_proj = nn.Linear(hidden, 6)
 
     def forward(
         self,
@@ -840,35 +820,43 @@ class StudentTHorizonHead(HeadBase):
 
         Returns
         -------
-        mu_seq : (batch, horizon) — per-step drift
+        mu_seq : (batch, horizon) — per-step drift (Brownian walk)
         sigma_seq : (batch, horizon) — per-step volatility (positive)
         nu_seq : (batch, horizon) — per-step degrees-of-freedom (>2)
         """
+        batch = h_t.shape[0]
+        device = h_t.device
+
         h_t = self.norm(h_t)
-        features = self.net(h_t)  # (batch, hidden)
+        feat = self.net(h_t)
+        params = self.param_proj(feat)  # (batch, 6)
 
-        # Global centres
-        mu_0 = self.mu_center(features)        # (batch, 1)
-        sigma_0 = self.sigma_center(features)  # (batch, 1)
-        nu_0 = self.nu_center(features)        # (batch, 1)
+        # --- extract meta-parameters ---
+        mu_mu = params[:, 0:1]
+        mu_logstd = params[:, 1:2].clamp(-5, 2)
 
-        # Basis coefficients
-        mu_coeffs = self.mu_basis_proj(features)
-        sigma_coeffs = self.sigma_basis_proj(features)
-        nu_coeffs = self.nu_basis_proj(features)
+        sig_mu = params[:, 2:3]
+        sig_logstd = params[:, 3:4].clamp(-5, 2)
 
-        # Basis matrix
-        basis = self._build_basis(horizon, h_t.device)
+        # nu: sigmoid → [2.1, 30.1]
+        nu_mu = torch.sigmoid(params[:, 4:5]) * 28.0 + 2.1
+        nu_logstd = params[:, 5:6].clamp(-5, 1)
 
-        # Per-step drift and volatility via spectral expansion
-        mu_seq = mu_0 + mu_coeffs @ basis                         # (batch, horizon)
-        sigma_seq = F.softplus(sigma_0 + sigma_coeffs @ basis) + 1e-6
+        # --- Brownian walk parameter paths ---
+        # Scale by 1/sqrt(horizon) to keep total variance constant
+        step_scale = 1.0 / math.sqrt(max(horizon, 1))
 
-        # Per-step nu: sigmoid → [nu_min, nu_max]
-        nu_seq = (
-            torch.sigmoid(nu_0 + nu_coeffs @ basis) * self.nu_range
-            + self.nu_min
-        )  # (batch, horizon)
+        # Drift path
+        eps_mu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        mu_seq = mu_mu + mu_logstd.exp() * eps_mu  # (batch, horizon)
+
+        # Volatility path (positive via softplus)
+        eps_sig = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        sigma_seq = F.softplus(sig_mu + sig_logstd.exp() * eps_sig) + 1e-6
+
+        # Degrees-of-freedom path (>2 for finite variance)
+        eps_nu = torch.randn(batch, horizon, device=device).cumsum(dim=-1) * step_scale
+        nu_seq = F.softplus(nu_mu + nu_logstd.exp() * eps_nu) + 2.0
 
         return mu_seq, sigma_seq, nu_seq
 

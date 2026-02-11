@@ -163,6 +163,16 @@ class TestHeadOutputShapes:
         assert (paths > 0).all(), "Prices should be positive"
         assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
 
+    def test_student_t_brownian_walk_smoothness(self):
+        """StudentTHorizonHead Brownian walk should produce temporally smooth params."""
+        head = StudentTHorizonHead(latent_size=64)
+        h_t = torch.randn(4, 64)
+        mu_seq, sigma_seq, nu_seq = head(h_t, 60)
+        # Step-to-step differences should be small relative to the overall range
+        mu_diffs = (mu_seq[:, 1:] - mu_seq[:, :-1]).abs().mean()
+        mu_range = mu_seq.max() - mu_seq.min() + 1e-8
+        assert mu_diffs / mu_range < 0.5, "Brownian walk should produce smooth trajectories"
+
     def test_neural_bridge_head_returns_3_values(self):
         """NeuralBridgeHead should return (macro_ret, micro_returns, sigma)."""
         head = NeuralBridgeHead(latent_size=128, micro_steps=12)
