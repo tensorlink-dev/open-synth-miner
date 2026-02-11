@@ -13,7 +13,7 @@ from src.models.factory import (
 )
 from src.models.heads import (
     GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
-    StudentTHorizonHead, NeuralBridgeHead, SDEHead,
+    StudentTHorizonHead, ProbabilisticHorizonHead, NeuralBridgeHead, SDEHead,
 )
 
 
@@ -199,6 +199,135 @@ class TestHeadOutputShapes:
         assert micro_path.shape == (4, 12)
         # Prices should be positive and scaled relative to current_price
         assert (micro_path > 0).all(), "Absolute prices should be positive"
+
+
+class TestProbabilisticHorizonHead:
+    """Tests for the unified ProbabilisticHorizonHead (spectral/brownian/hybrid)."""
+
+    @pytest.mark.parametrize("mode", ["spectral", "brownian", "hybrid"])
+    def test_output_shape(self, mode):
+        """All modes should return (mu_seq, sigma_seq, nu_seq) shaped (batch, horizon)."""
+        head = ProbabilisticHorizonHead(latent_size=64, hidden_dim=32, mode=mode)
+        h_t = torch.randn(4, 64)
+        mu_seq, sigma_seq, nu_seq = head(h_t, 60)
+
+        assert mu_seq.shape == (4, 60), f"mu shape mismatch for mode={mode}"
+        assert sigma_seq.shape == (4, 60), f"sigma shape mismatch for mode={mode}"
+        assert nu_seq.shape == (4, 60), f"nu shape mismatch for mode={mode}"
+        assert (sigma_seq > 0).all(), f"Sigma should be positive for mode={mode}"
+        assert (nu_seq >= 2.1).all(), f"Nu should be >= 2.1 for mode={mode}"
+        assert (nu_seq <= 30.1).all(), f"Nu should be <= 30.1 for mode={mode}"
+
+    @pytest.mark.parametrize("mode", ["spectral", "brownian", "hybrid"])
+    def test_different_horizons(self, mode):
+        """All modes should support arbitrary horizon lengths."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode=mode)
+        h_t = torch.randn(2, 32)
+        for horizon in [1, 12, 48, 100]:
+            mu_seq, sigma_seq, nu_seq = head(h_t, horizon)
+            assert mu_seq.shape == (2, horizon)
+            assert sigma_seq.shape == (2, horizon)
+            assert nu_seq.shape == (2, horizon)
+            assert (sigma_seq > 0).all()
+
+    def test_spectral_is_deterministic(self):
+        """Spectral mode should be deterministic (same input -> same output)."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="spectral")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, sig1, nu1 = head(h_t, 24)
+        mu2, sig2, nu2 = head(h_t, 24)
+        assert torch.allclose(mu1, mu2), "Spectral mode should be deterministic"
+        assert torch.allclose(sig1, sig2), "Spectral mode should be deterministic"
+        assert torch.allclose(nu1, nu2), "Spectral mode should be deterministic"
+
+    def test_brownian_is_stochastic(self):
+        """Brownian mode should produce different outputs across calls."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="brownian")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _, _ = head(h_t, 24)
+        mu2, _, _ = head(h_t, 24)
+        # Extremely unlikely to be exactly equal with random noise
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Brownian mode should be stochastic"
+
+    def test_hybrid_is_stochastic(self):
+        """Hybrid mode should be stochastic due to Brownian component."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="hybrid")
+        head.eval()
+        h_t = torch.randn(2, 32)
+        mu1, _, _ = head(h_t, 24)
+        mu2, _, _ = head(h_t, 24)
+        assert not torch.allclose(mu1, mu2, atol=1e-6), "Hybrid mode should be stochastic"
+
+    def test_brownian_walk_smoothness(self):
+        """Brownian walk should produce temporally smooth parameter trajectories."""
+        head = ProbabilisticHorizonHead(latent_size=64, mode="brownian")
+        h_t = torch.randn(4, 64)
+        mu_seq, _, _ = head(h_t, 60)
+        mu_diffs = (mu_seq[:, 1:] - mu_seq[:, :-1]).abs().mean()
+        mu_range = mu_seq.max() - mu_seq.min() + 1e-8
+        assert mu_diffs / mu_range < 0.5, "Brownian walk should produce smooth trajectories"
+
+    @pytest.mark.parametrize("n_basis", [1, 4, 8, 16])
+    def test_different_n_basis(self, n_basis):
+        """Spectral/hybrid modes should work with different n_basis values."""
+        for mode in ["spectral", "hybrid"]:
+            head = ProbabilisticHorizonHead(latent_size=32, mode=mode, n_basis=n_basis)
+            h_t = torch.randn(2, 32)
+            mu_seq, sigma_seq, nu_seq = head(h_t, 12)
+            assert mu_seq.shape == (2, 12)
+            assert (sigma_seq > 0).all()
+
+    def test_invalid_mode_raises(self):
+        """Invalid mode should raise ValueError."""
+        with pytest.raises(ValueError, match="mode must be one of"):
+            ProbabilisticHorizonHead(latent_size=32, mode="invalid")
+
+    @pytest.mark.parametrize("mode", ["spectral", "brownian", "hybrid"])
+    def test_with_simulate_t_horizon_paths(self, mode):
+        """Outputs should be compatible with simulate_t_horizon_paths."""
+        head = ProbabilisticHorizonHead(latent_size=64, mode=mode)
+        h_t = torch.randn(2, 64)
+        initial_price = torch.tensor([100.0, 200.0])
+        horizon = 12
+        n_paths = 50
+
+        mu_seq, sigma_seq, nu_seq = head(h_t, horizon)
+        paths = simulate_t_horizon_paths(initial_price, mu_seq, sigma_seq, nu_seq, n_paths)
+
+        assert paths.shape == (2, 50, 12), f"Expected (2, 50, 12), got {paths.shape}"
+        assert (paths > 0).all(), "Prices should be positive"
+        assert torch.isfinite(paths).all(), "Paths should not contain NaN or Inf"
+
+    def test_spectral_only_has_basis_weights(self):
+        """Spectral mode should have basis_weights but not param_proj."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="spectral")
+        assert hasattr(head, "basis_weights")
+        assert not hasattr(head, "param_proj")
+
+    def test_brownian_only_has_param_proj(self):
+        """Brownian mode should have param_proj but not basis_weights."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="brownian")
+        assert hasattr(head, "param_proj")
+        assert not hasattr(head, "basis_weights")
+
+    def test_hybrid_has_both(self):
+        """Hybrid mode should have both basis_weights and param_proj."""
+        head = ProbabilisticHorizonHead(latent_size=32, mode="hybrid")
+        assert hasattr(head, "basis_weights")
+        assert hasattr(head, "param_proj")
+
+    @pytest.mark.parametrize("mode", ["spectral", "brownian", "hybrid"])
+    def test_numerical_stability(self, mode):
+        """Outputs should be finite for all modes."""
+        head = ProbabilisticHorizonHead(latent_size=64, mode=mode)
+        # Test with extreme inputs
+        h_t = torch.randn(4, 64) * 10.0
+        mu_seq, sigma_seq, nu_seq = head(h_t, 48)
+        assert torch.isfinite(mu_seq).all(), f"mu has non-finite values for mode={mode}"
+        assert torch.isfinite(sigma_seq).all(), f"sigma has non-finite values for mode={mode}"
+        assert torch.isfinite(nu_seq).all(), f"nu has non-finite values for mode={mode}"
 
 
 class TestSimulationFunctions:

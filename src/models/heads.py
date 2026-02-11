@@ -862,6 +862,191 @@ class StudentTHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
+# Probabilistic Horizon Head (unified spectral / brownian / hybrid)
+# ---------------------------------------------------------------------------
+
+
+class ProbabilisticHorizonHead(HeadBase):
+    """Unified head supporting three forecasting strategies via a mode switch.
+
+    Returns per-step ``(mu_t, sigma_t, nu_t)`` trajectories using one of:
+
+    1. **spectral** — Deterministic sinusoidal basis expansion.  The
+       parameter trajectory is a smooth, learnable curve built from low-frequency
+       Fourier modes.  Produces the most stable gradients and is best for
+       short horizons with predictable cyclicality.
+
+    2. **brownian** — Pure stochastic random-walk evolution.  Parameters
+       evolve via cumulative Brownian noise, modelling regime shifts and
+       chaotic dynamics.  Forces the model to learn a posterior robust to
+       parameter drift.
+
+    3. **hybrid** — Spectral backbone with Brownian perturbations.  The
+       spectral basis captures the global (macro) trend while Brownian
+       residuals add local, high-frequency jitter.  This decomposes the
+       parameter space into *systematic drift* (spectral) and *local
+       diffusion* (Brownian).
+
+    All modes return three parameters per step—drift ``mu``, volatility
+    ``sigma``, and Student-*t* degrees-of-freedom ``nu``—and are designed
+    for use with :func:`simulate_t_horizon_paths`.
+
+    Architecture::
+
+        h_t  (batch, d_model)
+              │
+              ▼
+        ┌────────────┐
+        │ LayerNorm  │
+        └─────┬──────┘
+              ▼
+        ┌────────────┐
+        │  Shared MLP│  (d_model → hidden → hidden)
+        └─────┬──────┘
+              │
+         ┌────┴─────────────────────────────────────┐
+         │ (spectral / hybrid)                       │ (brownian / hybrid)
+         ▼                                           ▼
+      basis_weights → sin/cos expansion         param_proj → 6 meta-params
+      → spectral_path  (batch, 3, H)           → brownian_path  (batch, 3, H)
+         │                                           │
+         └──────────────┬────────────────────────────┘
+                        ▼  element-wise sum
+                   total_path  (batch, 3, H)
+                        │
+                        ▼
+              mu, sigma (softplus), nu (sigmoid→[2.1, 30.1])
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    hidden_dim:
+        Hidden dimension of the shared MLP.  Default: 64.
+    mode:
+        One of ``'spectral'``, ``'brownian'``, or ``'hybrid'``.
+        Default: ``'hybrid'``.
+    n_basis:
+        Number of Fourier frequency components for spectral / hybrid
+        modes.  Each contributes sin *and* cos terms so total basis
+        functions = ``2 * n_basis``.  Default: 8.
+    """
+
+    _VALID_MODES = {"spectral", "brownian", "hybrid"}
+
+    def __init__(
+        self,
+        latent_size: int,
+        hidden_dim: int = 64,
+        mode: str = "hybrid",
+        n_basis: int = 8,
+    ) -> None:
+        super().__init__()
+        if mode not in self._VALID_MODES:
+            raise ValueError(
+                f"mode must be one of {sorted(self._VALID_MODES)}, got {mode!r}"
+            )
+        self.mode = mode
+        self.n_basis = n_basis
+        self.norm = nn.LayerNorm(latent_size)
+
+        # Shared feature extractor
+        self.net = nn.Sequential(
+            nn.Linear(latent_size, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        if mode in ("spectral", "hybrid"):
+            # Learnable weights for 3 params (mu, sig, nu) × 2 (sin/cos) × n_basis
+            self.basis_weights = nn.Linear(hidden_dim, 3 * 2 * n_basis)
+
+        if mode in ("brownian", "hybrid"):
+            # Meta-stats: [mu_mu, mu_std, sig_mu, sig_std, nu_mu, nu_std]
+            self.param_proj = nn.Linear(hidden_dim, 6)
+
+    def _get_spectral_path(
+        self, feat: torch.Tensor, horizon: int,
+    ) -> torch.Tensor:
+        """Build smooth parameter trajectories from sinusoidal basis.
+
+        Uses a matmul of learned coefficients against a sin/cos basis matrix,
+        following the same pattern as :class:`CLTHorizonHead`.
+
+        Returns
+        -------
+        spectral_path : (batch, 3, horizon)
+        """
+        batch_size = feat.shape[0]
+        device = feat.device
+
+        # Basis matrix: (2*K, H)
+        t = torch.linspace(0.0, 1.0, horizon, device=device)
+        freqs = torch.arange(1, self.n_basis + 1, device=device, dtype=feat.dtype)
+        phase = 2.0 * math.pi * freqs.unsqueeze(1) * t.unsqueeze(0)  # (K, H)
+        basis = torch.cat([torch.sin(phase), torch.cos(phase)], dim=0)  # (2*K, H)
+
+        # Coefficients: (B, 3, 2*K)
+        coeffs = self.basis_weights(feat).view(batch_size, 3, 2 * self.n_basis)
+
+        # Spectral path: (B, 3, 2*K) @ (2*K, H) → (B, 3, H)
+        return coeffs @ basis
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        horizon: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+        horizon : prediction length
+
+        Returns
+        -------
+        mu_seq : (batch, horizon) — per-step drift
+        sigma_seq : (batch, horizon) — per-step volatility (positive)
+        nu_seq : (batch, horizon) — per-step degrees-of-freedom (in [2.1, 30.1])
+        """
+        h_t = self.norm(h_t)
+        feat = self.net(h_t)
+        batch_size = h_t.shape[0]
+
+        # 1. Spectral component
+        if self.mode in ("spectral", "hybrid"):
+            spec_path = self._get_spectral_path(feat, horizon)
+        else:
+            spec_path = torch.zeros(batch_size, 3, horizon, device=h_t.device)
+
+        # 2. Brownian component
+        if self.mode in ("brownian", "hybrid"):
+            p = self.param_proj(feat)  # (batch, 6)
+            step_scale = 1.0 / math.sqrt(max(horizon, 1))
+
+            noise = (
+                torch.randn(batch_size, 3, horizon, device=h_t.device).cumsum(dim=-1)
+                * step_scale
+            )
+            # Scale noise by predicted meta-stds (indices 1, 3, 5)
+            stds = F.softplus(p[:, [1, 3, 5]]).unsqueeze(-1)  # (batch, 3, 1)
+            brownian_path = p[:, [0, 2, 4]].unsqueeze(-1) + stds * noise
+        else:
+            brownian_path = torch.zeros(batch_size, 3, horizon, device=h_t.device)
+
+        # 3. Combine paths
+        total_path = spec_path + brownian_path  # (batch, 3, horizon)
+
+        # 4. Final parameter mapping
+        mu_seq = total_path[:, 0, :]
+        sigma_seq = F.softplus(total_path[:, 1, :]) + 1e-6
+        # Map nu to [2.1, 30.1] range
+        nu_seq = torch.sigmoid(total_path[:, 2, :]) * 28.0 + 2.1
+
+        return mu_seq, sigma_seq, nu_seq
+
+
+# ---------------------------------------------------------------------------
 # Neural Bridge Head (hierarchical macro + micro texture)
 # ---------------------------------------------------------------------------
 
