@@ -10,6 +10,11 @@ from src.data import MarketDataLoader
 from src.models.registry import discover_components
 from src.research.backtest import ChallengerVsChampion
 from src.research.experiment_mgr import run_experiment
+from src.research.ablation_grid import (
+    AblationGridSpec,
+    generate_ablation_grid,
+    describe_grid,
+)
 from src.tracking.hub_manager import HubManager
 
 
@@ -66,6 +71,62 @@ def _backtest_flow(cfg: DictConfig) -> None:
     wandb.finish()
 
 
+def _ablation_flow(cfg: DictConfig) -> None:
+    """Run a grid ablation study over engineers, RevIN/DLinear combos, kernel sizes, and nheads.
+
+    Groups configs by feature_dim so each group gets a matching data loader.
+    """
+    discover_components("src/models/components")
+
+    abl_cfg = cfg.get("ablation", {})
+    spec = AblationGridSpec(
+        engineers=list(abl_cfg.get("engineers", ["zscore", "wavelet"])),
+        revin_dlinear=list(abl_cfg.get("revin_dlinear", ["none", "revin", "dlinear", "revin_dlinear"])),
+        kernel_sizes=list(abl_cfg.get("kernel_sizes", [15, 25, 51])),
+        nheads=list(abl_cfg.get("nheads", [2, 4, 8])),
+        d_model=int(abl_cfg.get("d_model", 32)),
+        head_target=str(abl_cfg.get("head_target", "src.models.heads.GBMHead")),
+    )
+
+    training_overrides = OmegaConf.to_container(abl_cfg.get("training", {}), resolve=True)
+    configs = generate_ablation_grid(spec, training_overrides=training_overrides or None)
+
+    print(describe_grid(configs))
+    print()
+
+    from src.research.ablation import AblationExperiment
+    from src.research.experiment_mgr import _build_dummy_batch
+    from torch.utils.data import DataLoader, TensorDataset
+
+    # Group configs by feature_dim (different engineers produce different dims)
+    groups: dict = {}
+    for name, exp_cfg in configs.items():
+        fdim = int(exp_cfg.training.feature_dim)
+        groups.setdefault(fdim, {})[name] = exp_cfg
+
+    all_results: dict = {}
+    for fdim, group_configs in groups.items():
+        print(f"\n--- Running group: feature_dim={fdim} ({len(group_configs)} configs) ---")
+
+        # Build a matching dummy loader for this feature_dim group
+        sample_cfg = next(iter(group_configs.values()))
+        t_cfg = OmegaConf.to_container(sample_cfg.get("training", {}), resolve=True)
+        batch = _build_dummy_batch(t_cfg)
+        dataset = TensorDataset(batch["history"], batch["initial_price"])
+        loader = DataLoader(dataset, batch_size=t_cfg.get("batch_size", 4))
+
+        experiment = AblationExperiment(configs=group_configs, mode="train")
+        results = experiment.run(train_loader=loader, val_loader=loader)
+        all_results.update(results)
+
+    print("\n" + "=" * 60)
+    print("ABLATION RESULTS SUMMARY")
+    print("=" * 60)
+    for name, metrics in sorted(all_results.items()):
+        metric_str = ", ".join(f"{k}: {v:.4f}" for k, v in metrics.items())
+        print(f"  {name}: {metric_str}")
+
+
 @hydra.main(config_path="configs", config_name="config", version_base=None)
 def main(cfg: DictConfig) -> None:
     mode = cfg.get("mode", "train")
@@ -73,6 +134,8 @@ def main(cfg: DictConfig) -> None:
         _train_flow(cfg)
     elif mode == "backtest":
         _backtest_flow(cfg)
+    elif mode == "ablation":
+        _ablation_flow(cfg)
     else:
         raise ValueError(f"Unsupported mode: {mode}")
 

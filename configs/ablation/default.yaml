@@ -1,0 +1,42 @@
+# Ablation study defaults
+# Override individual axes via CLI:
+#   python main.py mode=ablation ablation.engineers="[zscore]" ablation.nheads="[4,8]"
+
+ablation:
+  # Feature engineering strategies to compare
+  engineers:
+    - zscore
+    - wavelet
+
+  # RevIN / DLinear block combinations
+  # Options: none, revin, dlinear, revin_dlinear
+  revin_dlinear:
+    - none
+    - revin
+    - dlinear
+    - revin_dlinear
+
+  # DLinear moving-average kernel sizes (only active when DLinear is present)
+  kernel_sizes:
+    - 15
+    - 25
+    - 51
+
+  # Transformer attention heads
+  nheads:
+    - 2
+    - 4
+    - 8
+
+  # Shared architecture settings
+  d_model: 32
+  head_target: src.models.heads.GBMHead
+
+  # Training overrides for ablation runs
+  training:
+    epochs: 5
+    n_paths: 100
+    lr: 0.001
+    batch_size: 4
+    seq_len: 32
+    horizon: 12
