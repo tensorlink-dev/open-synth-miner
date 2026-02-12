@@ -20,9 +20,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase, BlockBase
 from .heads import (
-    GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
-    StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
-    GaussianSpectralHead,
+    GBMHead, HorizonHead, SimpleHorizonHead,
     NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase,
 )
 from .registry import discover_components
@@ -317,22 +315,6 @@ class SynthModel(nn.Module):
                 initial_price, micro_returns, sigma, n_paths, dt,
             )
             return paths, macro_ret.squeeze(-1), sigma
-        elif isinstance(self.head, (StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification)):
-            h_t = self.backbone(x)
-            mu_seq, sigma_seq, nu_seq = self.head(h_t, horizon)
-            if apply_revin_denorm and self._revin_layers:
-                mu_seq, sigma_seq = self._denormalize_outputs(mu_seq, sigma_seq)
-            paths = simulate_t_horizon_paths(
-                initial_price, mu_seq, sigma_seq, nu_seq, n_paths, dt,
-            )
-            return paths, mu_seq, sigma_seq
-        elif isinstance(self.head, (CLTHorizonHead, GaussianSpectralHead)):
-            h_t = self.backbone(x)
-            mu_seq, sigma_seq = self.head(h_t, horizon)
-            if apply_revin_denorm and self._revin_layers:
-                mu_seq, sigma_seq = self._denormalize_outputs(mu_seq, sigma_seq)
-            paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
-            return paths, mu_seq, sigma_seq
         elif isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
@@ -535,70 +517,12 @@ def simulate_bridge_paths(
     return paths
 
 
-def simulate_t_horizon_paths(
-    initial_price: torch.Tensor,
-    mu_seq: torch.Tensor,
-    sigma_seq: torch.Tensor,
-    nu_seq: torch.Tensor,
-    n_paths: int,
-    dt: float = 1.0,
-) -> torch.Tensor:
-    """GBM path simulation with per-step Student-*t* innovations.
-
-    Like :func:`simulate_horizon_paths` but draws innovations from
-    ``StudentT(nu_t)`` instead of ``N(0,1)``, producing fatter-tailed
-    price dynamics when degrees-of-freedom are low.
-
-    Parameters
-    ----------
-    initial_price : (batch,)
-    mu_seq : (batch, horizon) — drift per step
-    sigma_seq : (batch, horizon) — volatility per step (positive)
-    nu_seq : (batch, horizon) — degrees-of-freedom per step (>2)
-    n_paths : number of Monte-Carlo paths
-    dt : time-step scale
-
-    Returns
-    -------
-    paths : (batch, n_paths, horizon)
-    """
-    batch, horizon = mu_seq.shape
-    device = mu_seq.device
-
-    mu = mu_seq.unsqueeze(1)         # (batch, 1, horizon)
-    sigma = sigma_seq.unsqueeze(1)   # (batch, 1, horizon)
-    nu = nu_seq.unsqueeze(1)         # (batch, 1, horizon)
-
-    # --- Student-t innovations via reparameterization ---
-    # t(nu) = Z / sqrt(V / nu)  where Z ~ N(0,1), V ~ Chi²(nu) = 2·Gamma(nu/2,1)
-    z = torch.randn(batch, n_paths, horizon, device=device)
-    alpha = (nu / 2.0).expand(batch, n_paths, horizon).clamp(min=0.5)
-    v = torch.distributions.Gamma(alpha, torch.ones_like(alpha)).rsample()
-    eps = z / (v / alpha + 1e-8).sqrt()  # (batch, n_paths, horizon)
-
-    sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
-    drift = (mu - 0.5 * sigma ** 2) * dt
-    diffusion = sigma * sqrt_dt * eps
-    log_returns = drift + diffusion
-    cum_log_returns = torch.cumsum(log_returns, dim=2)
-    cum_log_returns = torch.clamp(cum_log_returns, min=-80.0, max=80.0)
-
-    initial_price = initial_price.view(batch, 1, 1)
-    paths = initial_price * torch.exp(cum_log_returns)
-    return paths
-
-
 HEAD_REGISTRY = {
     "gbm": GBMHead,
     "sde": SDEHead,
     "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
     "simple_horizon": SimpleHorizonHead,
-    "clt_horizon": CLTHorizonHead,
-    "student_t_horizon": StudentTHorizonHead,
-    "probabilistic_horizon": ProbabilisticHorizonHead,
-    "horizon_unification": HorizonHeadUnification,
-    "gaussian_spectral": GaussianSpectralHead,
     "neural_bridge": NeuralBridgeHead,
 }
 
@@ -755,7 +679,6 @@ __all__ = [
     "ParallelFusion",
     "simulate_gbm_paths",
     "simulate_horizon_paths",
-    "simulate_t_horizon_paths",
     "simulate_bridge_paths",
     "build_model",
     "create_model",
