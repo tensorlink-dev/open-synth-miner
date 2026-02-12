@@ -4,7 +4,7 @@ Generates a cross-product of model configurations varying:
 - Feature engineers (ZScore, Wavelet)
 - RevIN / DLinear block presence
 - DLinear kernel sizes
-- Transformer attention heads (nhead)
+- Model heads (GBM, SDE, SimpleHorizon, CLTHorizon, GaussianSpectral)
 
 Each combination is emitted as a named OmegaConf config compatible with
 :class:`AblationExperiment`.
@@ -46,7 +46,17 @@ REVIN_DLINEAR_COMBOS: Dict[str, Tuple[bool, bool]] = {
 }
 
 DEFAULT_KERNEL_SIZES: List[int] = [15, 25, 51]
-DEFAULT_NHEADS: List[int] = [2, 4, 8]
+
+# Head specs: name → (_target_, extra kwargs)
+# Only heads that accept just latent_size (or simple extras) are included
+# to keep the grid runnable without special routing logic.
+HEAD_SPECS: Dict[str, Dict[str, Any]] = {
+    "gbm": {"_target_": "src.models.heads.GBMHead"},
+    "sde": {"_target_": "src.models.heads.SDEHead"},
+    "simple_horizon": {"_target_": "src.models.heads.SimpleHorizonHead"},
+    "clt_horizon": {"_target_": "src.models.heads.CLTHorizonHead"},
+    "gaussian_spectral": {"_target_": "src.models.heads.GaussianSpectralHead"},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -65,9 +75,8 @@ class AblationGridSpec:
     engineers: List[str] = field(default_factory=lambda: list(ENGINEER_SPECS.keys()))
     revin_dlinear: List[str] = field(default_factory=lambda: list(REVIN_DLINEAR_COMBOS.keys()))
     kernel_sizes: List[int] = field(default_factory=lambda: list(DEFAULT_KERNEL_SIZES))
-    nheads: List[int] = field(default_factory=lambda: list(DEFAULT_NHEADS))
+    heads: List[str] = field(default_factory=lambda: list(HEAD_SPECS.keys()))
     d_model: int = 32
-    head_target: str = "src.models.heads.GBMHead"
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +86,6 @@ class AblationGridSpec:
 
 def _build_blocks(
     d_model: int,
-    nhead: int,
     use_revin: bool,
     use_dlinear: bool,
     kernel_size: int,
@@ -98,14 +106,7 @@ def _build_blocks(
             "kernel_size": kernel_size,
         })
 
-    # Transformer block is always present as the core encoder
-    blocks.append({
-        "_target_": "src.models.registry.TransformerBlock",
-        "d_model": d_model,
-        "nhead": nhead,
-    })
-
-    # LSTM block as the sequence modeller
+    # LSTM as the core sequence model
     blocks.append({
         "_target_": "src.models.registry.LSTMBlock",
         "d_model": d_model,
@@ -119,9 +120,8 @@ def _build_single_config(
     engineer_name: str,
     revin_dlinear_name: str,
     kernel_size: int,
-    nhead: int,
+    head_name: str,
     d_model: int,
-    head_target: str,
     training_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a complete experiment config dict for one grid point."""
@@ -129,7 +129,9 @@ def _build_single_config(
     feature_dim = eng_spec["feature_dim"]
     use_revin, use_dlinear = REVIN_DLINEAR_COMBOS[revin_dlinear_name]
 
-    blocks = _build_blocks(d_model, nhead, use_revin, use_dlinear, kernel_size)
+    blocks = _build_blocks(d_model, use_revin, use_dlinear, kernel_size)
+
+    head_cfg = {**HEAD_SPECS[head_name], "latent_size": d_model}
 
     # Strip feature_dim from engineer config (it's metadata, not a ctor arg)
     eng_cfg = {k: v for k, v in eng_spec.items() if k != "feature_dim"}
@@ -144,10 +146,7 @@ def _build_single_config(
                 "validate_shapes": True,
                 "blocks": blocks,
             },
-            "head": {
-                "_target_": head_target,
-                "latent_size": d_model,
-            },
+            "head": head_cfg,
         },
         "data": {
             "engineer": eng_cfg,
@@ -174,14 +173,14 @@ def _experiment_name(
     engineer: str,
     rd_combo: str,
     kernel_size: int,
-    nhead: int,
+    head_name: str,
     use_dlinear: bool,
 ) -> str:
     """Generate a human-readable experiment name."""
     parts = [f"eng={engineer}", f"blocks={rd_combo}"]
     if use_dlinear:
         parts.append(f"ks={kernel_size}")
-    parts.append(f"nh={nhead}")
+    parts.append(f"head={head_name}")
     return "__".join(parts)
 
 
@@ -199,8 +198,6 @@ def generate_ablation_grid(
     Invalid combinations are automatically pruned:
     - ``kernel_size`` is only varied when DLinear is present; when DLinear
       is absent the kernel_size axis collapses to a single sentinel value.
-    - ``d_model`` must be divisible by ``nhead``; incompatible pairs are
-      skipped.
 
     Parameters
     ----------
@@ -220,29 +217,24 @@ def generate_ablation_grid(
 
     configs: Dict[str, DictConfig] = {}
 
-    for engineer, rd_combo, nhead in itertools.product(
+    for engineer, rd_combo, head_name in itertools.product(
         spec.engineers,
         spec.revin_dlinear,
-        spec.nheads,
+        spec.heads,
     ):
-        # Validate d_model / nhead compatibility
-        if spec.d_model % nhead != 0:
-            continue
-
         use_revin, use_dlinear = REVIN_DLINEAR_COMBOS[rd_combo]
 
         # Only sweep kernel_sizes when DLinear is present
         ks_values = spec.kernel_sizes if use_dlinear else [25]  # sentinel
 
         for ks in ks_values:
-            name = _experiment_name(engineer, rd_combo, ks, nhead, use_dlinear)
+            name = _experiment_name(engineer, rd_combo, ks, head_name, use_dlinear)
             raw = _build_single_config(
                 engineer_name=engineer,
                 revin_dlinear_name=rd_combo,
                 kernel_size=ks,
-                nhead=nhead,
+                head_name=head_name,
                 d_model=spec.d_model,
-                head_target=spec.head_target,
                 training_overrides=training_overrides,
             )
             configs[name] = OmegaConf.create(raw)
@@ -254,11 +246,11 @@ def describe_grid(configs: Dict[str, DictConfig]) -> str:
     """Return a summary table of the ablation grid."""
     lines = [
         f"Ablation grid: {len(configs)} configurations",
-        "-" * 60,
-        f"{'Name':<50} {'Blocks':>6}",
-        "-" * 60,
+        "-" * 70,
+        f"{'Name':<60} {'Blocks':>6}",
+        "-" * 70,
     ]
     for name, cfg in configs.items():
         n_blocks = len(cfg.model.backbone.blocks)
-        lines.append(f"{name:<50} {n_blocks:>6}")
+        lines.append(f"{name:<60} {n_blocks:>6}")
     return "\n".join(lines)

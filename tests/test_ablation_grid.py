@@ -10,6 +10,7 @@ from src.models.registry import discover_components
 from src.research.ablation_grid import (
     AblationGridSpec,
     ENGINEER_SPECS,
+    HEAD_SPECS,
     REVIN_DLINEAR_COMBOS,
     generate_ablation_grid,
     describe_grid,
@@ -26,26 +27,26 @@ class TestGridGeneration:
     """Tests for generate_ablation_grid."""
 
     def test_default_grid_size(self):
-        """Full grid: 2 engineers × (1+1+3+3) combos × 3 nheads = 48 configs.
+        """Full grid: 2 engineers × (1+1+3+3) rd_combos × 5 heads = 80 configs.
 
-        - none: 1 kernel_size sentinel × 3 nheads = 3
-        - revin: 1 kernel_size sentinel × 3 nheads = 3
-        - dlinear: 3 kernel_sizes × 3 nheads = 9
-        - revin_dlinear: 3 kernel_sizes × 3 nheads = 9
-        Per engineer: 3+3+9+9 = 24.  Two engineers: 48.
+        - none: 1 kernel_size sentinel × 5 heads = 5
+        - revin: 1 kernel_size sentinel × 5 heads = 5
+        - dlinear: 3 kernel_sizes × 5 heads = 15
+        - revin_dlinear: 3 kernel_sizes × 5 heads = 15
+        Per engineer: 5+5+15+15 = 40.  Two engineers: 80.
         """
         configs = generate_ablation_grid()
-        assert len(configs) == 48
+        assert len(configs) == 80
 
     def test_single_engineer(self):
         spec = AblationGridSpec(engineers=["zscore"])
         configs = generate_ablation_grid(spec)
-        assert len(configs) == 24
+        assert len(configs) == 40
         for name in configs:
             assert "eng=zscore" in name
 
-    def test_single_nhead(self):
-        spec = AblationGridSpec(nheads=[4])
+    def test_single_head(self):
+        spec = AblationGridSpec(heads=["gbm"])
         configs = generate_ablation_grid(spec)
         # 2 engineers × (1+1+3+3) = 16
         assert len(configs) == 16
@@ -54,8 +55,8 @@ class TestGridGeneration:
         """When DLinear is excluded, kernel_sizes should not expand the grid."""
         spec = AblationGridSpec(revin_dlinear=["none", "revin"])
         configs = generate_ablation_grid(spec)
-        # 2 engineers × 2 combos × 3 nheads = 12 (kernel_size collapsed)
-        assert len(configs) == 12
+        # 2 engineers × 2 combos × 5 heads = 20 (kernel_size collapsed)
+        assert len(configs) == 20
         for name in configs:
             assert "__ks=" not in name
 
@@ -63,29 +64,18 @@ class TestGridGeneration:
         spec = AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=["dlinear"],
-            nheads=[4],
+            heads=["gbm"],
         )
         configs = generate_ablation_grid(spec)
         assert len(configs) == 3  # 3 kernel sizes
         for name in configs:
             assert "__ks=" in name
 
-    def test_invalid_nhead_skipped(self):
-        """d_model=32 is not divisible by 5, so nhead=5 should be pruned."""
-        spec = AblationGridSpec(
-            engineers=["zscore"],
-            revin_dlinear=["none"],
-            nheads=[4, 5],
-        )
-        configs = generate_ablation_grid(spec)
-        assert len(configs) == 1
-        assert "nh=4" in list(configs.keys())[0]
-
     def test_training_overrides_applied(self):
         spec = AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=["none"],
-            nheads=[4],
+            heads=["gbm"],
         )
         configs = generate_ablation_grid(spec, training_overrides={"epochs": 20, "lr": 0.01})
         cfg = next(iter(configs.values()))
@@ -101,7 +91,7 @@ class TestConfigValidity:
         spec = AblationGridSpec(
             engineers=[engineer],
             revin_dlinear=["none"],
-            nheads=[4],
+            heads=["gbm"],
         )
         configs = generate_ablation_grid(spec)
         assert len(configs) == 1
@@ -114,7 +104,7 @@ class TestConfigValidity:
         spec = AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=[combo],
-            nheads=[4],
+            heads=["gbm"],
             kernel_sizes=[25],
         )
         configs = generate_ablation_grid(spec)
@@ -128,12 +118,12 @@ class TestConfigValidity:
                 paths, mu, sigma = model(x, price, horizon=4, n_paths=5)
             assert paths.shape == (2, 5, 4)
 
-    @pytest.mark.parametrize("nhead", [2, 4, 8])
-    def test_model_forward_per_nhead(self, nhead):
+    @pytest.mark.parametrize("head_name", list(HEAD_SPECS.keys()))
+    def test_model_forward_per_head(self, head_name):
         spec = AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=["none"],
-            nheads=[nhead],
+            heads=[head_name],
         )
         configs = generate_ablation_grid(spec)
         cfg = next(iter(configs.values()))
@@ -149,7 +139,7 @@ class TestConfigValidity:
         spec = AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=["dlinear"],
-            nheads=[4],
+            heads=["gbm"],
             kernel_sizes=[ks],
         )
         configs = generate_ablation_grid(spec)
@@ -166,7 +156,7 @@ class TestConfigValidity:
         spec = AblationGridSpec(
             engineers=["wavelet"],
             revin_dlinear=["revin_dlinear"],
-            nheads=[4],
+            heads=["gbm"],
             kernel_sizes=[25],
         )
         configs = generate_ablation_grid(spec)
@@ -188,9 +178,8 @@ class TestConfigContent:
                 engineer_name=eng_name,
                 revin_dlinear_name="none",
                 kernel_size=25,
-                nhead=4,
+                head_name="gbm",
                 d_model=32,
-                head_target="src.models.heads.GBMHead",
             )
             assert raw["model"]["backbone"]["input_size"] == eng_spec["feature_dim"]
             assert raw["training"]["feature_dim"] == eng_spec["feature_dim"]
@@ -200,9 +189,8 @@ class TestConfigContent:
             engineer_name="zscore",
             revin_dlinear_name="revin",
             kernel_size=25,
-            nhead=4,
+            head_name="gbm",
             d_model=32,
-            head_target="src.models.heads.GBMHead",
         )
         targets = [b["_target_"] for b in raw["model"]["backbone"]["blocks"]]
         assert any("RevIN" in t for t in targets)
@@ -213,28 +201,48 @@ class TestConfigContent:
             engineer_name="zscore",
             revin_dlinear_name="dlinear",
             kernel_size=51,
-            nhead=4,
+            head_name="gbm",
             d_model=32,
-            head_target="src.models.heads.GBMHead",
         )
         blocks = raw["model"]["backbone"]["blocks"]
         dlinear_blocks = [b for b in blocks if "DLinear" in b["_target_"]]
         assert len(dlinear_blocks) == 1
         assert dlinear_blocks[0]["kernel_size"] == 51
 
-    def test_nhead_propagated_to_transformer(self):
+    def test_no_transformer_in_blocks(self):
+        """Backbone should not contain a Transformer block."""
+        raw = _build_single_config(
+            engineer_name="zscore",
+            revin_dlinear_name="revin_dlinear",
+            kernel_size=25,
+            head_name="gbm",
+            d_model=32,
+        )
+        targets = [b["_target_"] for b in raw["model"]["backbone"]["blocks"]]
+        assert not any("Transformer" in t for t in targets)
+
+    def test_head_target_matches_spec(self):
         raw = _build_single_config(
             engineer_name="zscore",
             revin_dlinear_name="none",
             kernel_size=25,
-            nhead=8,
+            head_name="sde",
             d_model=32,
-            head_target="src.models.heads.GBMHead",
         )
-        blocks = raw["model"]["backbone"]["blocks"]
-        transformer_blocks = [b for b in blocks if "Transformer" in b["_target_"]]
-        assert len(transformer_blocks) == 1
-        assert transformer_blocks[0]["nhead"] == 8
+        assert raw["model"]["head"]["_target_"] == "src.models.heads.SDEHead"
+
+    def test_lstm_always_present(self):
+        """LSTM block should always be in the backbone."""
+        for combo in REVIN_DLINEAR_COMBOS:
+            raw = _build_single_config(
+                engineer_name="zscore",
+                revin_dlinear_name=combo,
+                kernel_size=25,
+                head_name="gbm",
+                d_model=32,
+            )
+            targets = [b["_target_"] for b in raw["model"]["backbone"]["blocks"]]
+            assert any("LSTM" in t for t in targets)
 
 
 class TestDescribeGrid:
@@ -242,7 +250,7 @@ class TestDescribeGrid:
         configs = generate_ablation_grid(AblationGridSpec(
             engineers=["zscore"],
             revin_dlinear=["none"],
-            nheads=[4],
+            heads=["gbm"],
         ))
         output = describe_grid(configs)
         assert "1 configurations" in output

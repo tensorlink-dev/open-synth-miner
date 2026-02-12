@@ -72,7 +72,7 @@ def _backtest_flow(cfg: DictConfig) -> None:
 
 
 def _ablation_flow(cfg: DictConfig) -> None:
-    """Run a grid ablation study over engineers, RevIN/DLinear combos, kernel sizes, and nheads.
+    """Run a grid ablation study over engineers, RevIN/DLinear combos, kernel sizes, and heads.
 
     Groups configs by feature_dim so each group gets a matching data loader.
     """
@@ -83,9 +83,8 @@ def _ablation_flow(cfg: DictConfig) -> None:
         engineers=list(abl_cfg.get("engineers", ["zscore", "wavelet"])),
         revin_dlinear=list(abl_cfg.get("revin_dlinear", ["none", "revin", "dlinear", "revin_dlinear"])),
         kernel_sizes=list(abl_cfg.get("kernel_sizes", [15, 25, 51])),
-        nheads=list(abl_cfg.get("nheads", [2, 4, 8])),
+        heads=list(abl_cfg.get("heads", ["gbm", "sde", "simple_horizon", "clt_horizon", "gaussian_spectral"])),
         d_model=int(abl_cfg.get("d_model", 32)),
-        head_target=str(abl_cfg.get("head_target", "src.models.heads.GBMHead")),
     )
 
     training_overrides = OmegaConf.to_container(abl_cfg.get("training", {}), resolve=True)

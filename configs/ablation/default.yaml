@@ -1,6 +1,6 @@
 # Ablation study defaults
 # Override individual axes via CLI:
-#   python main.py mode=ablation ablation.engineers="[zscore]" ablation.nheads="[4,8]"
+#   python main.py mode=ablation ablation.engineers="[zscore]" ablation.heads="[gbm,sde]"
 
 ablation:
   # Feature engineering strategies to compare
@@ -22,15 +22,17 @@ ablation:
     - 25
     - 51
 
-  # Transformer attention heads
-  nheads:
-    - 2
-    - 4
-    - 8
+  # Model heads to compare
+  # Options: gbm, sde, simple_horizon, clt_horizon, gaussian_spectral
+  heads:
+    - gbm
+    - sde
+    - simple_horizon
+    - clt_horizon
+    - gaussian_spectral
 
   # Shared architecture settings
   d_model: 32
-  head_target: src.models.heads.GBMHead
 
   # Training overrides for ablation runs
   training:
