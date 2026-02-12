@@ -21,6 +21,7 @@ from omegaconf import DictConfig, OmegaConf
 from .backbones import BackboneBase, BlockBase
 from .heads import (
     GBMHead, HorizonHead, SimpleHorizonHead,
+    MixtureDensityHead, VolTermStructureHead,
     NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase,
 )
 from .registry import discover_components
@@ -315,6 +316,25 @@ class SynthModel(nn.Module):
                 initial_price, micro_returns, sigma, n_paths, dt,
             )
             return paths, macro_ret.squeeze(-1), sigma
+        elif isinstance(self.head, MixtureDensityHead):
+            h_t = self.backbone(x)
+            mus, sigmas, weights = self.head(h_t)
+            if apply_revin_denorm and self._revin_layers:
+                mus, sigmas = self._denormalize_outputs(mus, sigmas)
+            paths = simulate_mixture_paths(
+                initial_price, mus, sigmas, weights, horizon, n_paths, dt,
+            )
+            # Return weighted-average mu/sigma for diagnostics
+            mu = (mus * weights).sum(dim=-1)
+            sigma = (sigmas * weights).sum(dim=-1)
+            return paths, mu, sigma
+        elif isinstance(self.head, VolTermStructureHead):
+            h_t = self.backbone(x)
+            mu_seq, sigma_seq = self.head(h_t, horizon)
+            if apply_revin_denorm and self._revin_layers:
+                mu_seq, sigma_seq = self._denormalize_outputs(mu_seq, sigma_seq)
+            paths = simulate_horizon_paths(initial_price, mu_seq, sigma_seq, n_paths, dt)
+            return paths, mu_seq, sigma_seq
         elif isinstance(self.head, (HorizonHead, SimpleHorizonHead)):
             h_seq = self.backbone.forward_sequence(x)
             mu_seq, sigma_seq = self.head(h_seq, horizon)
@@ -517,12 +537,69 @@ def simulate_bridge_paths(
     return paths
 
 
+def simulate_mixture_paths(
+    initial_price: torch.Tensor,
+    mus: torch.Tensor,
+    sigmas: torch.Tensor,
+    weights: torch.Tensor,
+    horizon: int,
+    n_paths: int,
+    dt: float = 1.0,
+) -> torch.Tensor:
+    """GBM path simulation with mixture-of-Gaussians components.
+
+    For each Monte Carlo path, a component is sampled from the categorical
+    distribution defined by ``weights``, and the path is simulated with
+    that component's constant ``(mu, sigma)``.
+
+    Parameters
+    ----------
+    initial_price : (batch,)
+    mus : (batch, K) — per-component drift
+    sigmas : (batch, K) — per-component volatility (positive)
+    weights : (batch, K) — component probabilities (sum to 1)
+    horizon : number of time steps
+    n_paths : number of Monte Carlo paths
+    dt : time-step scale
+
+    Returns
+    -------
+    paths : (batch, n_paths, horizon)
+    """
+    batch, K = mus.shape
+    device = mus.device
+
+    # Sample component indices: (batch, n_paths)
+    component_idx = torch.multinomial(weights, n_paths, replacement=True)
+
+    # Gather per-path mu and sigma: (batch, n_paths)
+    mu = torch.gather(mus, 1, component_idx)
+    sigma = torch.gather(sigmas, 1, component_idx)
+
+    # Reshape for broadcasting: (batch, n_paths, 1)
+    mu = mu.unsqueeze(-1)
+    sigma = sigma.unsqueeze(-1)
+
+    eps = torch.randn(batch, n_paths, horizon, device=device)
+    drift = (mu - 0.5 * sigma ** 2) * dt
+    diffusion = sigma * torch.sqrt(torch.tensor(dt, device=device)) * eps
+    log_returns = drift + diffusion
+    cum_log_returns = torch.cumsum(log_returns, dim=2)
+    cum_log_returns = torch.clamp(cum_log_returns, min=-80.0, max=80.0)
+
+    initial_price = initial_price.view(batch, 1, 1)
+    paths = initial_price * torch.exp(cum_log_returns)
+    return paths
+
+
 HEAD_REGISTRY = {
     "gbm": GBMHead,
     "sde": SDEHead,
     "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
     "simple_horizon": SimpleHorizonHead,
+    "mixture_density": MixtureDensityHead,
+    "vol_term_structure": VolTermStructureHead,
     "neural_bridge": NeuralBridgeHead,
 }
 
@@ -680,6 +757,7 @@ __all__ = [
     "simulate_gbm_paths",
     "simulate_horizon_paths",
     "simulate_bridge_paths",
+    "simulate_mixture_paths",
     "build_model",
     "create_model",
     "get_model",

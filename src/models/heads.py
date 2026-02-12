@@ -589,6 +589,224 @@ class SimpleHorizonHead(HeadBase):
 
 
 # ---------------------------------------------------------------------------
+# Mixture Density Head (K Gaussian components → fat tails via mixture)
+# ---------------------------------------------------------------------------
+
+
+class MixtureDensityHead(HeadBase):
+    """Predicts K Gaussian mixture components with constant drift and volatility.
+
+    Instead of per-step varying parameters (which suffer from gradient
+    variance and overfitting), this head predicts a small number of GBM
+    regimes, each with its own constant ``(mu_k, sigma_k)``.  During
+    simulation, each Monte Carlo path samples a regime and runs
+    constant-parameter GBM under it.
+
+    This naturally produces fat-tailed and multimodal path distributions
+    without Student-t reparameterization or stochastic parameter walks:
+
+    - Heavy tails emerge from mixing high-vol and low-vol components.
+    - Multimodality emerges when components have different drifts.
+    - The mixture weights are a simple softmax — easy to optimize.
+
+    Architecture::
+
+        h_t  (batch, d_model)   ← last-step backbone embedding
+              │
+              ▼
+        ┌────────────┐
+        │ LayerNorm  │
+        └─────┬──────┘
+              ▼
+        ┌────────────┐
+        │  MLP       │  (d_model → hidden → hidden)
+        └─────┬──────┘
+              │
+         ┌────┼──────────────┐
+         ▼    ▼              ▼
+        mu_k  sigma_k      logit_k
+       (B,K) (B,K)         (B,K)
+              │              │
+              │         softmax → weights
+              ▼              ▼
+        Simulation: for each path, sample component k
+        then run constant GBM with (mu_k, sigma_k)
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    n_components:
+        Number of Gaussian mixture components.  Default: 3.
+    hidden:
+        Hidden dimension of the shared MLP.  Default: 64.
+    """
+
+    def __init__(
+        self,
+        latent_size: int,
+        n_components: int = 3,
+        hidden: int = 64,
+    ) -> None:
+        super().__init__()
+        self.n_components = n_components
+        self.norm = nn.LayerNorm(latent_size)
+        self.net = nn.Sequential(
+            nn.Linear(latent_size, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.SiLU(),
+        )
+        self.mu_proj = nn.Linear(hidden, n_components)
+        self.sigma_proj = nn.Linear(hidden, n_components)
+        self.logit_proj = nn.Linear(hidden, n_components)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+
+        Returns
+        -------
+        mus : (batch, K) — per-component drift
+        sigmas : (batch, K) — per-component volatility (positive)
+        weights : (batch, K) — component probabilities (sum to 1)
+        """
+        h_t = self.norm(h_t)
+        feat = self.net(h_t)
+
+        mus = self.mu_proj(feat)                                    # (batch, K)
+        sigmas = F.softplus(self.sigma_proj(feat)) + 1e-6           # (batch, K)
+        weights = F.softmax(self.logit_proj(feat), dim=-1)          # (batch, K)
+
+        return mus, sigmas, weights
+
+
+# ---------------------------------------------------------------------------
+# Volatility Term Structure Head (parametric vol curve)
+# ---------------------------------------------------------------------------
+
+
+class VolTermStructureHead(HeadBase):
+    """Parametric volatility term structure with minimal free parameters.
+
+    Predicts a base ``(mu_0, sigma_0)`` plus two shape parameters that
+    define smooth, monotonic drift and volatility curves over the horizon:
+
+    - ``mu(t)  = mu_0 + drift_slope * (t / H)``
+    - ``sigma(t) = sigma_0 * exp(vol_slope * (t / H))``
+
+    Only **4 predicted scalars** per sample generate horizon-length
+    parameter curves.  This is the minimal useful extension of GBMHead
+    that can express time-varying dynamics:
+
+    - ``vol_slope > 0``: volatility grows (uncertainty fans out)
+    - ``vol_slope < 0``: volatility shrinks (mean-reversion)
+    - ``vol_slope ≈ 0``: constant vol (degenerates to GBMHead)
+    - ``drift_slope ≠ 0``: momentum decay or acceleration
+
+    The shape parameters are bounded via ``tanh`` to prevent extreme
+    curves that would blow up the simulation.
+
+    Architecture::
+
+        h_t  (batch, d_model)   ← last-step backbone embedding
+              │
+              ▼
+        ┌────────────┐
+        │ LayerNorm  │
+        └─────┬──────┘
+              ▼
+        ┌────────────┐
+        │  MLP       │  (d_model → hidden → hidden)
+        └─────┬──────┘
+              │
+              ▼  Linear → 4 params
+        ┌──────────────────────────────┐
+        │ mu_0         base drift      │
+        │ sigma_0_pre  base vol (pre-  │
+        │              softplus)       │
+        │ vol_slope    tanh-bounded    │
+        │ drift_slope  tanh-bounded    │
+        └──────────────┬───────────────┘
+                       │
+                       ▼  parametric curves
+        mu_seq    = mu_0 + drift_slope * t/H    (batch, horizon)
+        sigma_seq = sigma_0 * exp(vol_slope * t/H) (batch, horizon)
+
+    Parameters
+    ----------
+    latent_size:
+        Must match the backbone ``d_model``.
+    hidden:
+        Hidden dimension of the shared MLP.  Default: 64.
+    max_vol_slope:
+        Maximum absolute value of vol_slope (via tanh scaling).
+        Default: 2.0.  ``exp(2.0) ≈ 7.4×`` max vol growth factor.
+    max_drift_slope:
+        Maximum absolute value of drift_slope (via tanh scaling).
+        Default: 1.0.
+    """
+
+    def __init__(
+        self,
+        latent_size: int,
+        hidden: int = 64,
+        max_vol_slope: float = 2.0,
+        max_drift_slope: float = 1.0,
+    ) -> None:
+        super().__init__()
+        self.max_vol_slope = max_vol_slope
+        self.max_drift_slope = max_drift_slope
+        self.norm = nn.LayerNorm(latent_size)
+        self.net = nn.Sequential(
+            nn.Linear(latent_size, hidden),
+            nn.SiLU(),
+            nn.Linear(hidden, hidden),
+            nn.SiLU(),
+        )
+        # 4 params: mu_0, sigma_0_pre, vol_slope_pre, drift_slope_pre
+        self.param_proj = nn.Linear(hidden, 4)
+
+    def forward(
+        self,
+        h_t: torch.Tensor,
+        horizon: int,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Parameters
+        ----------
+        h_t : (batch, d_model) — last-step backbone embedding
+        horizon : prediction length
+
+        Returns
+        -------
+        mu_seq : (batch, horizon) — per-step drift
+        sigma_seq : (batch, horizon) — per-step volatility (positive)
+        """
+        h_t = self.norm(h_t)
+        feat = self.net(h_t)
+        params = self.param_proj(feat)  # (batch, 4)
+
+        mu_0 = params[:, 0:1]                                             # (batch, 1)
+        sigma_0 = F.softplus(params[:, 1:2]) + 1e-6                       # (batch, 1)
+        vol_slope = torch.tanh(params[:, 2:3]) * self.max_vol_slope       # (batch, 1)
+        drift_slope = torch.tanh(params[:, 3:4]) * self.max_drift_slope   # (batch, 1)
+
+        # Normalized time grid: [0, 1] over the horizon
+        t = torch.linspace(0.0, 1.0, horizon, device=h_t.device).unsqueeze(0)  # (1, horizon)
+
+        mu_seq = mu_0 + drift_slope * t                    # (batch, horizon)
+        sigma_seq = sigma_0 * torch.exp(vol_slope * t)     # (batch, horizon)
+
+        return mu_seq, sigma_seq
+
+
+# ---------------------------------------------------------------------------
 # Neural Bridge Head (hierarchical macro + micro texture)
 # ---------------------------------------------------------------------------
 
