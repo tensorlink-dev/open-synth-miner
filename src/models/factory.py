@@ -20,9 +20,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from .backbones import BackboneBase, BlockBase
 from .heads import (
-    GBMHead, HorizonHead, SimpleHorizonHead, CLTHorizonHead,
-    StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification,
-    GaussianSpectralHead,
+    GBMHead, HorizonHead, SimpleHorizonHead,
+    MixtureDensityHead, VolTermStructureHead,
     NeuralBridgeHead, NeuralSDEHead, SDEHead, HeadBase,
 )
 from .registry import discover_components
@@ -317,16 +316,19 @@ class SynthModel(nn.Module):
                 initial_price, micro_returns, sigma, n_paths, dt,
             )
             return paths, macro_ret.squeeze(-1), sigma
-        elif isinstance(self.head, (StudentTHorizonHead, ProbabilisticHorizonHead, HorizonHeadUnification)):
+        elif isinstance(self.head, MixtureDensityHead):
             h_t = self.backbone(x)
-            mu_seq, sigma_seq, nu_seq = self.head(h_t, horizon)
+            mus, sigmas, weights = self.head(h_t)
             if apply_revin_denorm and self._revin_layers:
-                mu_seq, sigma_seq = self._denormalize_outputs(mu_seq, sigma_seq)
-            paths = simulate_t_horizon_paths(
-                initial_price, mu_seq, sigma_seq, nu_seq, n_paths, dt,
+                mus, sigmas = self._denormalize_outputs(mus, sigmas)
+            paths = simulate_mixture_paths(
+                initial_price, mus, sigmas, weights, horizon, n_paths, dt,
             )
-            return paths, mu_seq, sigma_seq
-        elif isinstance(self.head, (CLTHorizonHead, GaussianSpectralHead)):
+            # Return weighted-average mu/sigma for diagnostics
+            mu = (mus * weights).sum(dim=-1)
+            sigma = (sigmas * weights).sum(dim=-1)
+            return paths, mu, sigma
+        elif isinstance(self.head, VolTermStructureHead):
             h_t = self.backbone(x)
             mu_seq, sigma_seq = self.head(h_t, horizon)
             if apply_revin_denorm and self._revin_layers:
@@ -535,50 +537,52 @@ def simulate_bridge_paths(
     return paths
 
 
-def simulate_t_horizon_paths(
+def simulate_mixture_paths(
     initial_price: torch.Tensor,
-    mu_seq: torch.Tensor,
-    sigma_seq: torch.Tensor,
-    nu_seq: torch.Tensor,
+    mus: torch.Tensor,
+    sigmas: torch.Tensor,
+    weights: torch.Tensor,
+    horizon: int,
     n_paths: int,
     dt: float = 1.0,
 ) -> torch.Tensor:
-    """GBM path simulation with per-step Student-*t* innovations.
+    """GBM path simulation with mixture-of-Gaussians components.
 
-    Like :func:`simulate_horizon_paths` but draws innovations from
-    ``StudentT(nu_t)`` instead of ``N(0,1)``, producing fatter-tailed
-    price dynamics when degrees-of-freedom are low.
+    For each Monte Carlo path, a component is sampled from the categorical
+    distribution defined by ``weights``, and the path is simulated with
+    that component's constant ``(mu, sigma)``.
 
     Parameters
     ----------
     initial_price : (batch,)
-    mu_seq : (batch, horizon) — drift per step
-    sigma_seq : (batch, horizon) — volatility per step (positive)
-    nu_seq : (batch, horizon) — degrees-of-freedom per step (>2)
-    n_paths : number of Monte-Carlo paths
+    mus : (batch, K) — per-component drift
+    sigmas : (batch, K) — per-component volatility (positive)
+    weights : (batch, K) — component probabilities (sum to 1)
+    horizon : number of time steps
+    n_paths : number of Monte Carlo paths
     dt : time-step scale
 
     Returns
     -------
     paths : (batch, n_paths, horizon)
     """
-    batch, horizon = mu_seq.shape
-    device = mu_seq.device
+    batch, K = mus.shape
+    device = mus.device
 
-    mu = mu_seq.unsqueeze(1)         # (batch, 1, horizon)
-    sigma = sigma_seq.unsqueeze(1)   # (batch, 1, horizon)
-    nu = nu_seq.unsqueeze(1)         # (batch, 1, horizon)
+    # Sample component indices: (batch, n_paths)
+    component_idx = torch.multinomial(weights, n_paths, replacement=True)
 
-    # --- Student-t innovations via reparameterization ---
-    # t(nu) = Z / sqrt(V / nu)  where Z ~ N(0,1), V ~ Chi²(nu) = 2·Gamma(nu/2,1)
-    z = torch.randn(batch, n_paths, horizon, device=device)
-    alpha = (nu / 2.0).expand(batch, n_paths, horizon).clamp(min=0.5)
-    v = torch.distributions.Gamma(alpha, torch.ones_like(alpha)).rsample()
-    eps = z / (v / alpha + 1e-8).sqrt()  # (batch, n_paths, horizon)
+    # Gather per-path mu and sigma: (batch, n_paths)
+    mu = torch.gather(mus, 1, component_idx)
+    sigma = torch.gather(sigmas, 1, component_idx)
 
-    sqrt_dt = torch.sqrt(torch.tensor(dt, device=device))
+    # Reshape for broadcasting: (batch, n_paths, 1)
+    mu = mu.unsqueeze(-1)
+    sigma = sigma.unsqueeze(-1)
+
+    eps = torch.randn(batch, n_paths, horizon, device=device)
     drift = (mu - 0.5 * sigma ** 2) * dt
-    diffusion = sigma * sqrt_dt * eps
+    diffusion = sigma * torch.sqrt(torch.tensor(dt, device=device)) * eps
     log_returns = drift + diffusion
     cum_log_returns = torch.cumsum(log_returns, dim=2)
     cum_log_returns = torch.clamp(cum_log_returns, min=-80.0, max=80.0)
@@ -594,11 +598,8 @@ HEAD_REGISTRY = {
     "neural_sde": NeuralSDEHead,
     "horizon": HorizonHead,
     "simple_horizon": SimpleHorizonHead,
-    "clt_horizon": CLTHorizonHead,
-    "student_t_horizon": StudentTHorizonHead,
-    "probabilistic_horizon": ProbabilisticHorizonHead,
-    "horizon_unification": HorizonHeadUnification,
-    "gaussian_spectral": GaussianSpectralHead,
+    "mixture_density": MixtureDensityHead,
+    "vol_term_structure": VolTermStructureHead,
     "neural_bridge": NeuralBridgeHead,
 }
 
@@ -755,8 +756,8 @@ __all__ = [
     "ParallelFusion",
     "simulate_gbm_paths",
     "simulate_horizon_paths",
-    "simulate_t_horizon_paths",
     "simulate_bridge_paths",
+    "simulate_mixture_paths",
     "build_model",
     "create_model",
     "get_model",
