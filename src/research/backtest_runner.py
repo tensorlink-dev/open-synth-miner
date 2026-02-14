@@ -60,7 +60,15 @@ class BacktestRunner:
                     paths, _, _ = model(history, initial_price=initial_price, horizon=horizon, n_paths=n_paths)
                 batch_results: Dict[str, List[float]] = defaultdict(list)
                 for sample_idx in range(paths.shape[0]):
-                    total_crps, detailed = self.scorer(paths[sample_idx], actual_series[sample_idx])
+                    # Prepend initial price (t=0) so the scorer has a complete
+                    # price series from t=0..horizon.  Without this, boundary
+                    # intervals whose step count equals the horizon (e.g. 24-hour
+                    # at 288 five-minute steps) produce no scoring increments.
+                    ip = initial_price[sample_idx]
+                    n_sim = paths.shape[1]
+                    sim_with_t0 = torch.cat([ip.view(1, 1).expand(n_sim, 1), paths[sample_idx]], dim=1)
+                    actual_with_t0 = torch.cat([ip.view(1), actual_series[sample_idx]])
+                    total_crps, detailed = self.scorer(sim_with_t0, actual_with_t0)
                     for row in detailed:
                         interval_name = row["Interval"]
                         if interval_name == "Overall":

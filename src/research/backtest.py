@@ -62,8 +62,15 @@ class ChallengerVsChampion:
                 champ_paths, _, _ = champion(history, initial_price=initial_price, horizon=self.horizon, n_paths=self.n_paths)
                 chall_paths, _, _ = challenger(history, initial_price=initial_price, horizon=self.horizon, n_paths=self.n_paths)
 
-            champ_total, champ_detail = self.scorer(champ_paths[0], actual_series[0])
-            chall_total, chall_detail = self.scorer(chall_paths[0], actual_series[0])
+            # Prepend initial price (t=0) so the scorer has a complete price
+            # series from t=0..horizon, fixing boundary intervals like 24-hour.
+            ip = initial_price[0]
+            n_sim = champ_paths.shape[1]
+            champ_with_t0 = torch.cat([ip.view(1, 1).expand(n_sim, 1), champ_paths[0]], dim=1)
+            chall_with_t0 = torch.cat([ip.view(1, 1).expand(n_sim, 1), chall_paths[0]], dim=1)
+            actual_with_t0 = torch.cat([ip.view(1), actual_series[0]])
+            champ_total, champ_detail = self.scorer(champ_with_t0, actual_with_t0)
+            chall_total, chall_detail = self.scorer(chall_with_t0, actual_with_t0)
 
             aggregated["champion"] = {row["Interval"]: float(row["CRPS"]) for row in champ_detail if row["Increment"] == "Total"}
             aggregated["challenger"] = {row["Interval"]: float(row["CRPS"]) for row in chall_detail if row["Increment"] == "Total"}
