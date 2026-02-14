@@ -1,14 +1,30 @@
 """Composable registry for hybrid backbones and components with auto-discovery."""
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import importlib
+import inspect
 import json
 import pathlib
-from typing import Any, Callable, Dict, Iterable, Optional, Type
+from typing import Any, Callable, Dict, Iterable, List, Optional, Type
 
 import torch
 import torch.nn as nn
+
+
+@dataclasses.dataclass(frozen=True)
+class BlockInfo:
+    """Metadata for a registered block, component, or hybrid."""
+
+    name: str
+    cls: Any  # Type[nn.Module] for blocks/components, Callable for hybrids
+    kind: str  # "block", "component", or "hybrid"
+    description: str = ""
+    preserves_seq_len: bool = True
+    preserves_d_model: bool = True
+    min_seq_len: int = 1
+    source_module: str = ""
 
 
 class Registry:
@@ -18,6 +34,7 @@ class Registry:
         self.components: Dict[str, Type[nn.Module]] = {}
         self.blocks: Dict[str, Type[nn.Module]] = {}
         self.hybrids: Dict[str, Callable[..., nn.Module]] = {}
+        self._info: Dict[str, BlockInfo] = {}
 
     def __getattr__(self, name: str) -> Callable[..., nn.Module]:
         """Provide attribute-style access to registered entries.
@@ -40,11 +57,24 @@ class Registry:
         if key in store:
             raise ValueError(f"Duplicate registration detected for '{key}'")
 
-    def register_component(self, name: Optional[str] = None) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
+    def register_component(
+        self,
+        name: Optional[str] = None,
+        *,
+        description: str = "",
+    ) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
         def decorator(cls: Type[nn.Module]) -> Type[nn.Module]:
             key = (name or cls.__name__).lower()
             self._ensure_unique(self.components, key)
             self.components[key] = cls
+            desc = description or (cls.__doc__ or "").split("\n")[0].strip()
+            self._info[key] = BlockInfo(
+                name=key,
+                cls=cls,
+                kind="component",
+                description=desc,
+                source_module=cls.__module__,
+            )
             return cls
 
         return decorator
@@ -56,6 +86,7 @@ class Registry:
         preserves_seq_len: bool = True,
         preserves_d_model: bool = True,
         min_seq_len: int = 1,
+        description: str = "",
     ) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
         """Register a backbone block with optional shape metadata.
 
@@ -69,6 +100,9 @@ class Registry:
             Whether the block preserves the feature dimension (default True).
         min_seq_len : int
             Minimum sequence length the block can handle (default 1).
+        description : str, optional
+            Human-readable description of the block.  Falls back to the
+            first line of the class docstring when omitted.
 
         The metadata is stored as class-level attributes so that
         ``HybridBackbone.validate_shapes`` can inspect blocks without
@@ -82,15 +116,39 @@ class Registry:
             cls.preserves_d_model = preserves_d_model
             cls.min_seq_len = min_seq_len
             self.blocks[key] = cls
+            desc = description or (cls.__doc__ or "").split("\n")[0].strip()
+            self._info[key] = BlockInfo(
+                name=key,
+                cls=cls,
+                kind="block",
+                description=desc,
+                preserves_seq_len=preserves_seq_len,
+                preserves_d_model=preserves_d_model,
+                min_seq_len=min_seq_len,
+                source_module=cls.__module__,
+            )
             return cls
 
         return decorator
 
-    def register_hybrid(self, name: Optional[str] = None) -> Callable[[Callable[..., nn.Module]], Callable[..., nn.Module]]:
+    def register_hybrid(
+        self,
+        name: Optional[str] = None,
+        *,
+        description: str = "",
+    ) -> Callable[[Callable[..., nn.Module]], Callable[..., nn.Module]]:
         def decorator(fn: Callable[..., nn.Module]) -> Callable[..., nn.Module]:
             key = (name or fn.__name__).lower()
             self._ensure_unique(self.hybrids, key)
             self.hybrids[key] = fn
+            desc = description or (fn.__doc__ or "").split("\n")[0].strip()
+            self._info[key] = BlockInfo(
+                name=key,
+                cls=fn,
+                kind="hybrid",
+                description=desc,
+                source_module=fn.__module__ if hasattr(fn, "__module__") else "",
+            )
             return fn
 
         return decorator
@@ -112,6 +170,66 @@ class Registry:
         if key not in self.hybrids:
             raise KeyError(f"Hybrid '{name}' not found in registry")
         return self.hybrids[key]
+
+    # ------------------------------------------------------------------
+    # Block registry introspection
+    # ------------------------------------------------------------------
+
+    def get_info(self, name: str) -> BlockInfo:
+        """Return :class:`BlockInfo` for a registered name."""
+        key = name.lower()
+        if key not in self._info:
+            raise KeyError(f"'{name}' not found in registry")
+        return self._info[key]
+
+    def list_blocks(self, kind: Optional[str] = None) -> List[BlockInfo]:
+        """Return a list of all registered :class:`BlockInfo` entries.
+
+        Parameters
+        ----------
+        kind : str, optional
+            Filter by kind (``"block"``, ``"component"``, or ``"hybrid"``).
+            Returns all entries when *None*.
+        """
+        entries = list(self._info.values())
+        if kind is not None:
+            entries = [e for e in entries if e.kind == kind]
+        return sorted(entries, key=lambda e: (e.kind, e.name))
+
+    def summary(self, kind: Optional[str] = None) -> str:
+        """Return a human-readable summary table of registered entries.
+
+        Parameters
+        ----------
+        kind : str, optional
+            Filter by kind (``"block"``, ``"component"``, or ``"hybrid"``).
+            Returns all entries when *None*.
+        """
+        entries = self.list_blocks(kind=kind)
+        if not entries:
+            return "No registered entries."
+
+        # Column widths
+        name_w = max(len(e.name) for e in entries)
+        kind_w = max(len(e.kind) for e in entries)
+        name_w = max(name_w, 4)  # minimum header width
+        kind_w = max(kind_w, 4)
+
+        lines: List[str] = []
+        header = (
+            f"{'Name':<{name_w}}  {'Kind':<{kind_w}}  "
+            f"{'Seq':>3}  {'Dim':>3}  {'MinS':>4}  Description"
+        )
+        lines.append(header)
+        lines.append("-" * len(header))
+        for e in entries:
+            seq = "Y" if e.preserves_seq_len else "N"
+            dim = "Y" if e.preserves_d_model else "N"
+            lines.append(
+                f"{e.name:<{name_w}}  {e.kind:<{kind_w}}  "
+                f"{seq:>3}  {dim:>3}  {e.min_seq_len:>4}  {e.description}"
+            )
+        return "\n".join(lines)
 
     @staticmethod
     def recipe_hash(recipe: Any) -> str:
@@ -156,7 +274,7 @@ def discover_components(package_path: str | pathlib.Path, package_root: str = "s
 registry = Registry()
 
 
-@registry.register_component("customattention")
+@registry.register_component("customattention", description="Multi-head self-attention component")
 class CustomAttention(nn.Module):
     """Lightweight attention component used inside blocks."""
 
@@ -169,7 +287,7 @@ class CustomAttention(nn.Module):
         return out
 
 
-@registry.register_component("gatedmlp")
+@registry.register_component("gatedmlp", description="Gated feedforward MLP component")
 class GatedMLP(nn.Module):
     """Feedforward block with gating."""
 
@@ -189,7 +307,7 @@ class GatedMLP(nn.Module):
         return gate * z + (1 - gate) * x
 
 
-@registry.register_component("patchmerging")
+@registry.register_component("patchmerging", description="Sequence downsampling via average pooling")
 class PatchMerging(nn.Module):
     """Simple downsampling over the sequence dimension."""
 
@@ -203,7 +321,7 @@ class PatchMerging(nn.Module):
         return self.proj(pooled)
 
 
-@registry.register_block("transformerblock")
+@registry.register_block("transformerblock", description="Transformer encoder with self-attention and gated MLP")
 class TransformerBlock(nn.Module):
     """Transformer-style block combining attention and MLP."""
 
@@ -220,7 +338,7 @@ class TransformerBlock(nn.Module):
         return x
 
 
-@registry.register_block("lstmblock")
+@registry.register_block("lstmblock", description="LSTM-based sequence modeling block")
 class LSTMBlock(nn.Module):
     """Sequence modeling block backed by an LSTM over the projected features."""
 
@@ -239,7 +357,7 @@ class LSTMBlock(nn.Module):
         return out
 
 
-@registry.register_block("sdeevolutionblock")
+@registry.register_block("sdeevolutionblock", description="Residual stochastic differential evolution block")
 class SDEEvolutionBlock(nn.Module):
     """Block that learns residual stochastic updates."""
 
@@ -256,7 +374,7 @@ class SDEEvolutionBlock(nn.Module):
         return x + self.net(x)
 
 
-@registry.register_hybrid("attn_sde")
+@registry.register_hybrid("attn_sde", description="Transformer attention followed by SDE evolution")
 def attn_sde_recipe(d_model: int, **kwargs: Any) -> nn.Module:
     """Example hybrid wiring attention then SDE evolution."""
 
@@ -269,6 +387,7 @@ def attn_sde_recipe(d_model: int, **kwargs: Any) -> nn.Module:
 __all__ = [
     "registry",
     "Registry",
+    "BlockInfo",
     "discover_components",
     "CustomAttention",
     "GatedMLP",

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("rnnblock")
+@registry.register_block("rnnblock", description="Elman RNN for basic sequential modeling")
 class RNNBlock(nn.Module):
     """Simple Elman RNN block."""
 
@@ -38,7 +38,7 @@ class RNNBlock(nn.Module):
         return out
 
 
-@registry.register_block("grublock")
+@registry.register_block("grublock", description="Gated Recurrent Unit for sequence modeling")
 class GRUBlock(nn.Module):
     """Gated Recurrent Unit (GRU) block."""
 
@@ -62,7 +62,7 @@ class GRUBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("resconvblock")
+@registry.register_block("resconvblock", description="1D residual convolution with batch norm")
 class ResConvBlock(nn.Module):
     """1D residual convolutional block."""
 
@@ -86,7 +86,7 @@ class ResConvBlock(nn.Module):
         return (x_in + y).transpose(1, 2)
 
 
-@registry.register_block("bitcnblock")
+@registry.register_block("bitcnblock", description="Bidirectional temporal convolution with dilation")
 class BiTCNBlock(nn.Module):
     """Bidirectional temporal convolutional block with dilation."""
 
@@ -111,7 +111,7 @@ class BiTCNBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("patchembedding", preserves_seq_len=False)
+@registry.register_block("patchembedding", preserves_seq_len=False, description="Strided convolution patch embedding (changes seq len)")
 class PatchEmbedding(nn.Module):
     """Projects raw input sequence into ``d_model`` using strided convolutions."""
 
@@ -126,7 +126,7 @@ class PatchEmbedding(nn.Module):
         return x.transpose(1, 2)
 
 
-@registry.register_block("unet1dblock")
+@registry.register_block("unet1dblock", description="U-Net style down-up convolution with skip connection")
 class Unet1DBlock(nn.Module):
     """U-Net style block that preserves sequence length."""
 
@@ -164,7 +164,7 @@ class Unet1DBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("transformerencoder")
+@registry.register_block("transformerencoder", description="PyTorch TransformerEncoder adapter block")
 class TransformerEncoderAdapter(nn.Module):
     """Wraps ``torch.nn.TransformerEncoder`` as a block."""
 
@@ -177,7 +177,7 @@ class TransformerEncoderAdapter(nn.Module):
         return self.encoder(x)
 
 
-@registry.register_block("transformerdecoder")
+@registry.register_block("transformerdecoder", description="PyTorch TransformerDecoder with self-conditioning memory")
 class TransformerDecoderAdapter(nn.Module):
     """Wraps ``torch.nn.TransformerDecoder`` with self-conditioning memory."""
 
@@ -195,7 +195,7 @@ class TransformerDecoderAdapter(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("fourierblock")
+@registry.register_block("fourierblock", description="Frequency-domain filtering via FFT (FedFormer-inspired)")
 class FourierBlock(nn.Module):
     """Frequency enhanced block similar to FedFormer."""
 
@@ -230,7 +230,7 @@ class FourierBlock(nn.Module):
         return x_out.permute(0, 2, 1) + x
 
 
-@registry.register_block("laststepadapter")
+@registry.register_block("laststepadapter", description="Pooling adapter (last/mean/max) for head alignment")
 class LastStepAdapter(nn.Module):
     """Lightweight pooling adapter to align backbone outputs with heads."""
 
@@ -251,7 +251,7 @@ class LastStepAdapter(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("revin")
+@registry.register_block("revin", description="Reversible instance normalization for non-stationary data")
 class RevIN(nn.Module):
     """Reversible instance normalization for non-stationary sequences."""
 
@@ -283,7 +283,7 @@ class RevIN(nn.Module):
         raise ValueError(f"Unknown RevIN mode: {mode}")
 
 
-@registry.register_block("flexiblepatchembed", preserves_seq_len=False)
+@registry.register_block("flexiblepatchembed", preserves_seq_len=False, description="Flexible patch embedding with channel-independence and masking")
 class FlexiblePatchEmbed(nn.Module):
     """Patch embedding supporting channel-independence and masking."""
 
@@ -362,7 +362,7 @@ class FlexiblePatchEmbed(nn.Module):
         return x_masked, mask
 
 
-@registry.register_block("channelrejoin")
+@registry.register_block("channelrejoin", description="Reshapes channel-independent batches back (flatten/mean/stack)")
 class ChannelRejoin(nn.Module):
     """Reshape channel-independent batches back to original structure.
 
@@ -395,7 +395,7 @@ class ChannelRejoin(nn.Module):
         return x
 
 
-@registry.register_block("multiscalepatcher", preserves_seq_len=False)
+@registry.register_block("multiscalepatcher", preserves_seq_len=False, description="Multi-scale parallel patching with linear fusion")
 class MultiScalePatcher(nn.Module):
     """Apply multiple patch sizes in parallel and fuse them."""
 
@@ -442,7 +442,7 @@ class MultiScalePatcher(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("dlinearblock")
+@registry.register_block("dlinearblock", description="DLinear trend-seasonal decomposition with linear layers")
 class DLinearBlock(nn.Module):
     """DLinear block: moving-average decomposition into trend + seasonal, each with a linear layer.
 
@@ -480,7 +480,7 @@ class DLinearBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 
-@registry.register_block("layernormblock")
+@registry.register_block("layernormblock", description="Standalone LayerNorm for inter-block normalization")
 class LayerNormBlock(nn.Module):
     """Standalone LayerNorm block for inter-block normalization.
 
@@ -534,7 +534,7 @@ class _InceptionBlock2D(nn.Module):
         return self.norm(b1 + b3 + b5)
 
 
-@registry.register_block("timesnetblock", min_seq_len=4)
+@registry.register_block("timesnetblock", min_seq_len=4, description="TimesNet: FFT period discovery + 2D Inception convolutions")
 class TimesNetBlock(nn.Module):
     """TimesNet block: discovers dominant periods via FFT, reshapes into 2D, and applies Inception convolutions.
 
@@ -692,7 +692,7 @@ class _MultiScaleTrendMixing(nn.Module):
         return out_list
 
 
-@registry.register_block("timemixerblock")
+@registry.register_block("timemixerblock", description="TimeMixer: multi-scale trend/seasonal decomposable mixing")
 class TimeMixerBlock(nn.Module):
     """Past-Decomposable-Mixing block from TimeMixer (ICLR 2024).
 
@@ -770,7 +770,7 @@ class TimeMixerBlock(nn.Module):
         return self.norm(x + out)
 
 
-@registry.register_block("patchmixerblock")
+@registry.register_block("patchmixerblock", description="MLP-Mixer style token/feature mixing for patched series")
 class PatchMixerBlock(nn.Module):
     """MLP-Mixer style block for patched time series."""
 
