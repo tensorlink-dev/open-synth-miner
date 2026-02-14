@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import abc
+import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, Generator, List, Optional, Tuple, Union
 
@@ -863,6 +865,133 @@ class HFOHLCVSource(DataSource):
                     covariates=df[[col_map[c] for c in [self.open_col, self.high_col, self.low_col, self.vol_col]]].to_numpy(dtype=np.float64),
                 )
             )
+        return results
+
+
+logger = logging.getLogger(__name__)
+
+# Default ticker mapping: Synth subnet asset names → Massive API symbols.
+_DEFAULT_TICKER_MAP: Dict[str, str] = {
+    "SPYX": "SPY",
+    "NVDAX": "NVDA",
+    "TSLAX": "TSLA",
+    "AAPLX": "AAPL",
+    "GOOGLX": "GOOGL",
+}
+
+
+class MassiveStockSource(DataSource):
+    """Fetch OHLCV bars from the Massive (formerly Polygon) REST API.
+
+    Supports arbitrary bar sizes via *timespan* and *multiplier*.  For
+    example ``timespan="minute", multiplier=1`` yields 1-min bars, while
+    ``multiplier=5`` yields 5-min bars.
+
+    The ``ticker_map`` parameter lets you translate internal asset names
+    (e.g. ``"SPYX"``) to the ticker symbol recognised by the exchange
+    (e.g. ``"SPY"``).  If no explicit mapping is provided the built-in
+    :data:`_DEFAULT_TICKER_MAP` is used; unmapped names are passed through
+    as-is.
+
+    Parameters
+    ----------
+    api_key:
+        Massive API key.  Falls back to the ``MASSIVE_API_KEY`` environment
+        variable when ``None``.
+    timespan:
+        Bar granularity – ``"minute"``, ``"hour"``, ``"day"``, etc.
+    multiplier:
+        How many *timespan* units per bar (1 for 1-min, 5 for 5-min, …).
+    from_date / to_date:
+        Date range as ``"YYYY-MM-DD"`` strings.
+    adjusted:
+        Whether results are adjusted for splits (default ``True``).
+    ticker_map:
+        Optional ``{asset_name: api_ticker}`` override dictionary.
+    """
+
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        *,
+        timespan: str = "minute",
+        multiplier: int = 1,
+        from_date: str = "2024-01-01",
+        to_date: str = "2025-01-01",
+        adjusted: bool = True,
+        ticker_map: Optional[Dict[str, str]] = None,
+    ) -> None:
+        self.api_key = api_key or os.getenv("MASSIVE_API_KEY")
+        if not self.api_key:
+            raise ValueError(
+                "Massive API key is required. Set the MASSIVE_API_KEY "
+                "environment variable or pass api_key explicitly."
+            )
+        self.timespan = timespan
+        self.multiplier = multiplier
+        self.from_date = from_date
+        self.to_date = to_date
+        self.adjusted = adjusted
+        self.ticker_map = ticker_map if ticker_map is not None else dict(_DEFAULT_TICKER_MAP)
+
+    def _resolve_ticker(self, asset: str) -> str:
+        """Map an internal asset name to the exchange ticker."""
+        return self.ticker_map.get(asset, asset)
+
+    def load_data(self, assets: List[str]) -> List[AssetData]:
+        from massive import RESTClient
+
+        client = RESTClient(api_key=self.api_key)
+        results: List[AssetData] = []
+
+        for asset in assets:
+            ticker = self._resolve_ticker(asset)
+            logger.info(
+                "Fetching %s (%s) %d-%s bars from %s to %s",
+                asset, ticker, self.multiplier, self.timespan,
+                self.from_date, self.to_date,
+            )
+
+            aggs = list(
+                client.list_aggs(
+                    ticker=ticker,
+                    multiplier=self.multiplier,
+                    timespan=self.timespan,
+                    from_=self.from_date,
+                    to=self.to_date,
+                    adjusted=self.adjusted,
+                    sort="asc",
+                    limit=50000,
+                )
+            )
+
+            if not aggs:
+                logger.warning("No data returned for %s (%s)", asset, ticker)
+                continue
+
+            timestamps = pd.to_datetime(
+                [a.timestamp for a in aggs], unit="ms", utc=True
+            ).to_numpy()
+            opens = np.array([a.open for a in aggs], dtype=np.float64)
+            highs = np.array([a.high for a in aggs], dtype=np.float64)
+            lows = np.array([a.low for a in aggs], dtype=np.float64)
+            closes = np.array([a.close for a in aggs], dtype=np.float64)
+            volumes = np.array([a.volume for a in aggs], dtype=np.float64)
+
+            cov_cols = ["open", "high", "low", "volume"]
+            covariates = np.column_stack([opens, highs, lows, volumes])
+
+            results.append(
+                AssetData(
+                    name=asset,
+                    timestamps=timestamps,
+                    prices=closes,
+                    covariate_columns=cov_cols,
+                    covariates=covariates,
+                )
+            )
+            logger.info("Fetched %d bars for %s", len(aggs), asset)
+
         return results
 
 

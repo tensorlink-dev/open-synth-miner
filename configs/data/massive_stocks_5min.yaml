@@ -1,0 +1,20 @@
+data:
+  _target_: src.data.market_data_loader.MarketDataLoader
+  data_source:
+    _target_: src.data.market_data_loader.MassiveStockSource
+    api_key: ${oc.env:MASSIVE_API_KEY}
+    timespan: "minute"
+    multiplier: 5
+    from_date: "2024-01-01"
+    to_date: "2025-01-01"
+    adjusted: true
+  engineer:
+    _target_: src.data.market_data_loader.OHLCVEngineer
+    resample_rule: "5min"
+  assets: ["SPYX", "NVDAX", "TSLAX", "AAPLX", "GOOGLX"]
+  input_len: ${training.seq_len}
+  pred_len: ${training.horizon}
+  batch_size: ${training.batch_size}
+  feature_dim: 16
+  stride: 1
+  gap_handling: "ffill"
