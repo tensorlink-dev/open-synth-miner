@@ -4,6 +4,7 @@ data:
     _target_: src.data.market_data_loader.HFOHLCVSource
     repo_id: ${oc.env:OHLCV_REPO_ID,tensorlink-dev/open-synth-training-data}
     repo_type: dataset
+    timeframe: ${oc.env:OHLCV_TIMEFRAME,5m}
   engineer:
     _target_: src.data.market_data_loader.OHLCVEngineer
     resample_rule: "5min"
