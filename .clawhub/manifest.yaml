@@ -1,0 +1,237 @@
+# ClawHub Manifest — Open Synth Miner
+# This file enables Open Claw agents to discover and interact with this project.
+
+project:
+  name: open-synth-miner
+  version: "0.1.0"
+  description: >
+    Hydra-driven research framework for Bittensor SN50 (Synth) focused on
+    hybrid neural architectures, stochastic path simulation, and build-in-public
+    tracking via W&B and Hugging Face Hub.
+  domain: time-series-forecasting
+  subnet: bittensor-sn50
+  language: python
+  python_version: ">=3.10"
+  entry_point: main.py
+  config_system: hydra
+  config_root: configs/
+
+# ─── Capabilities ───────────────────────────────────────────────────
+# What this project can do — agents use this for task routing
+
+capabilities:
+  model_composition:
+    description: Build hybrid neural architectures from composable blocks via YAML
+    trigger_phrases:
+      - "add a block"
+      - "create a model"
+      - "new architecture"
+      - "register component"
+      - "hybrid backbone"
+    skill: skills/model_architecture.md
+
+  data_loading:
+    description: Load market data from HF Hub or synthetic sources with leak-safe windowing
+    trigger_phrases:
+      - "load data"
+      - "feature engineering"
+      - "OHLCV"
+      - "data source"
+      - "market data"
+    skill: skills/data_pipeline.md
+
+  training:
+    description: Train models with CRPS loss, log metrics to W&B
+    trigger_phrases:
+      - "train"
+      - "run experiment"
+      - "optimize"
+      - "learning rate"
+      - "training loop"
+    skill: skills/experiment_training.md
+
+  backtesting:
+    description: Champion-vs-challenger evaluation with multi-interval CRPS
+    trigger_phrases:
+      - "backtest"
+      - "champion"
+      - "challenger"
+      - "evaluate"
+      - "compare models"
+    skill: skills/backtest_evaluation.md
+
+  publishing:
+    description: Push models to HF Hub, log to W&B, generate shareable reports
+    trigger_phrases:
+      - "publish"
+      - "push to hub"
+      - "upload"
+      - "model card"
+      - "deploy"
+    skill: skills/deployment_publishing.md
+
+# ─── Extension Points ──────────────────────────────────────────────
+# Where agents can safely add new functionality
+
+extension_points:
+  backbone_blocks:
+    location: src/models/components/
+    pattern: "@registry.register_block"
+    auto_discovery: true
+    base_class: nn.Module
+    contract: "(batch, seq, d_model) → (batch, seq, d_model)"
+    instructions: >
+      Create a new .py file in src/models/components/. Decorate the class with
+      @registry.register_block("name"). It will be auto-discovered at runtime.
+
+  heads:
+    location: src/models/heads.py
+    base_class: HeadBase
+    contract: "h_t (batch, latent_size) → head-specific parameters"
+    instructions: >
+      Subclass HeadBase, implement forward(). Add to HEAD_REGISTRY dict
+      in factory.py and add routing logic to SynthModel.forward().
+
+  feature_engineers:
+    location: src/data/market_data_loader.py
+    base_class: FeatureEngineer
+    contract: "raw prices → (feature_dim, seq_len) tensors"
+    required_methods:
+      - "feature_dim (property)"
+      - "prepare_cache(prices) → cache"
+      - "make_input(cache, start, length) → Tensor"
+      - "make_target(cache, start, length) → Tensor"
+      - "get_volatility(cache, start, length) → float"
+
+  data_sources:
+    location: src/data/market_data_loader.py
+    base_class: DataSource
+    contract: "load_data(assets) → List[AssetData]"
+    instructions: >
+      Subclass DataSource, implement load_data() returning AssetData
+      instances with timestamps, prices, and optional covariates.
+
+  clustering_strategies:
+    location: src/data/regime_loader.py
+    base_class: ClusteringStrategy
+    contract: "fit(X) → self; predict(X) → labels; n_clusters() → int"
+
+  hydra_configs:
+    location: configs/
+    model_configs: configs/model/
+    data_configs: configs/data/
+    format: yaml
+    instructions: >
+      Create new .yaml files in configs/model/ or configs/data/.
+      Use _target_ entries for Hydra instantiation.
+
+# ─── Tools Required ────────────────────────────────────────────────
+
+tools_required:
+  runtime:
+    - python: ">=3.10"
+    - torch: ">=2.2.0"
+    - hydra-core: ">=1.3.2"
+    - wandb: ">=0.16.0"
+    - huggingface_hub: ">=0.22.0"
+    - properscoring: ">=0.1"
+  optional:
+    - torchsde: ">=0.2.6"       # NeuralSDEHead
+    - scikit-learn: ">=1.3.0"   # Regime clustering
+    - pywt: ">=1.5.0"           # WaveletEngineer
+  environment:
+    - WANDB_API_KEY: "Required for experiment tracking"
+    - HF_TOKEN: "Required for Hugging Face Hub uploads"
+
+# ─── File Map ──────────────────────────────────────────────────────
+# Critical files agents must understand
+
+file_map:
+  entry_point: main.py
+  model_factory: src/models/factory.py
+  registry: src/models/registry.py
+  heads: src/models/heads.py
+  backbones: src/models/backbones.py
+  advanced_blocks: src/models/components/advanced_blocks.py
+  data_loader: src/data/market_data_loader.py
+  regime_loader: src/data/regime_loader.py
+  trainer: src/research/trainer.py
+  experiment_mgr: src/research/experiment_mgr.py
+  backtest: src/research/backtest.py
+  metrics: src/research/metrics.py
+  hub_manager: src/tracking/hub_manager.py
+  wandb_logger: src/tracking/wandb_logger.py
+  root_config: configs/config.yaml
+  architecture_docs: docs/ARCHITECTURE.md
+  setup_docs: docs/SETUP.md
+
+# ─── Registered Blocks (built-in) ─────────────────────────────────
+
+registered_blocks:
+  components:
+    - name: customattention
+      class: CustomAttention
+      description: Multi-head self-attention component
+    - name: gatedmlp
+      class: GatedMLP
+      description: Gated feedforward MLP component
+    - name: patchmerging
+      class: PatchMerging
+      description: Sequence downsampling via average pooling
+
+  blocks:
+    - name: transformerblock
+      class: TransformerBlock
+      description: Transformer encoder with self-attention and gated MLP
+      params: [d_model, nhead, dropout]
+    - name: lstmblock
+      class: LSTMBlock
+      description: LSTM-based sequence modeling block
+      params: [d_model, num_layers, dropout]
+    - name: sdeevolutionblock
+      class: SDEEvolutionBlock
+      description: Residual stochastic differential evolution block
+      params: [d_model, hidden, dropout]
+
+  heads:
+    - name: gbm
+      class: GBMHead
+      description: Geometric Brownian Motion (constant mu, sigma)
+      returns: "(mu, sigma) scalars"
+    - name: sde
+      class: SDEHead
+      description: SDE parameters via deeper MLP
+      returns: "(mu, sigma) scalars"
+    - name: neural_sde
+      class: NeuralSDEHead
+      description: Full SDE integration via torchsde
+      returns: "(paths, mu, sigma)"
+    - name: horizon
+      class: HorizonHead
+      description: Per-step mu/sigma via cross-attention
+      returns: "(mu_seq, sigma_seq) per-step"
+    - name: simple_horizon
+      class: SimpleHorizonHead
+      description: Per-step mu/sigma via pooling + MLP (lightweight)
+      returns: "(mu_seq, sigma_seq) per-step"
+    - name: mixture_density
+      class: MixtureDensityHead
+      description: K Gaussian mixture components
+      returns: "(mus, sigmas, weights) per-component"
+    - name: vol_term_structure
+      class: VolTermStructureHead
+      description: Parametric volatility curve (4 params)
+      returns: "(mu_seq, sigma_seq) per-step"
+    - name: neural_bridge
+      class: NeuralBridgeHead
+      description: Hierarchical macro + micro texture
+      returns: "(macro_ret, micro_returns, sigma)"
+
+# ─── Validation Commands ───────────────────────────────────────────
+
+validation:
+  test_command: "python -m pytest tests/ -v"
+  lint_command: "python -m ruff check src/ tests/"
+  type_check: "python -m mypy src/ --ignore-missing-imports"
+  smoke_test: "python main.py --cfg job"
+  quick_train: "python main.py mode=train training.batch_size=2 training.n_paths=4 training.horizon=4"
