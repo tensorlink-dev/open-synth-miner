@@ -59,7 +59,6 @@ open-synth-miner = "main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=src --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:htmlcov"
 
 [tool.coverage.run]
 source = ["src"]
