@@ -765,21 +765,32 @@ class HFOHLCVSource(DataSource):
         Hugging Face dataset repository (e.g.
         ``"tensorlink-dev/open-synth-training-data"``).
     asset_files:
-        Mapping from asset name to the parquet path **inside** the repo
-        (e.g. ``{"BTC_USD": "BTC_USD/data.parquet"}``).  If ``None`` the
-        source auto-generates paths as ``"{asset}/data.parquet"``.
+        Mapping from asset name to the parquet path **inside** the repo.
+        Paths may contain a ``{timeframe}`` placeholder that is replaced by
+        the *timeframe* argument (e.g.
+        ``{"BTC_USD": "data/BTC_USD/{timeframe}.parquet"}``).  Paths
+        without the placeholder are used as-is.  If ``None`` the source
+        auto-generates paths using *filename_pattern*.
+    timeframe:
+        Candle resolution to load, e.g. ``"5m"`` or ``"1m"``.  Substituted
+        into ``{timeframe}`` placeholders in *asset_files* values and
+        *filename_pattern*.  Default: ``"5m"``.
     filename_pattern:
         Python format-string used when ``asset_files`` is ``None``.
-        ``{asset}`` is replaced by the asset name.
-        Default: ``"{asset}/data.parquet"``.
+        ``{asset}`` and ``{timeframe}`` are replaced by the asset name and
+        the *timeframe* value respectively.
+        Default: ``"data/{asset}/{timeframe}.parquet"``.
     """
+
+    VALID_TIMEFRAMES = ("1m", "5m")
 
     def __init__(
         self,
         repo_id: str,
         asset_files: Optional[Dict[str, str]] = None,
         *,
-        filename_pattern: str = "{asset}/data.parquet",
+        timeframe: str = "5m",
+        filename_pattern: str = "data/{asset}/{timeframe}.parquet",
         revision: Optional[str] = None,
         repo_type: Optional[str] = "dataset",
         timestamp_column: str = "timestamp",
@@ -789,8 +800,14 @@ class HFOHLCVSource(DataSource):
         close_column: str = "close",
         volume_column: str = "volume",
     ) -> None:
+        if timeframe not in self.VALID_TIMEFRAMES:
+            raise ValueError(
+                f"Invalid timeframe '{timeframe}'. "
+                f"Must be one of {self.VALID_TIMEFRAMES}."
+            )
         self.repo_id = repo_id
         self.asset_files = asset_files
+        self.timeframe = timeframe
         self.filename_pattern = filename_pattern
         self.revision = revision
         self.repo_type = repo_type
@@ -803,8 +820,8 @@ class HFOHLCVSource(DataSource):
 
     def _resolve_filename(self, asset: str) -> str:
         if self.asset_files and asset in self.asset_files:
-            return self.asset_files[asset]
-        return self.filename_pattern.format(asset=asset)
+            return self.asset_files[asset].format(timeframe=self.timeframe)
+        return self.filename_pattern.format(asset=asset, timeframe=self.timeframe)
 
     _TIMESTAMP_ALIASES = ["timestamp", "date", "datetime", "time", "ts", "Date", "Datetime", "Timestamp"]
 
