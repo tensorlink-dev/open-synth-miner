@@ -11,26 +11,41 @@ authors = [{ name = "Open Synth Miner Contributors" }]
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
+    # Core frameworks
     "hydra-core>=1.3.2",
+    "hydra-zen>=0.6.0",
     "omegaconf>=2.3.0",
+    # ML stack
     "torch>=2.2.0",
     "numpy>=1.24.0",
     "pandas>=2.2.0",
     "properscoring>=0.1",
-    "wandb>=0.16.0",
+    "pyarrow>=15.0.0",
+    "PyWavelets>=1.5.0",
+    "scikit-learn>=1.3.0",
+    # Experiment tracking and hubs
+    "wandb==0.25.0",
     "huggingface_hub>=0.22.0",
+    # Utilities
     "PyYAML>=6.0.0",
 ]
 
+[project.optional-dependencies]
+sde = ["torchsde>=0.2.6"]
+dev = [
+    "pytest>=8.0.0",
+    "torchsde>=0.2.6",
+]
+
 [tool.setuptools.packages.find]
-include = ["open_synth_miner", "src"]
+include = ["src*", "open_synth_miner*"]
 
 [tool.setuptools]
 include-package-data = true
 py-modules = ["main"]
 
-[tool.setuptools.data-files]
-configs = [
+[tool.setuptools.package-data]
+"*" = [
     "configs/*.yaml",
     "configs/**/*.yaml",
     "configs/**/*.json",
@@ -39,3 +54,6 @@ configs = [
 
 [project.scripts]
 open-synth-miner = "main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

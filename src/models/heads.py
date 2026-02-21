@@ -10,7 +10,13 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchsde
+
+try:
+    import torchsde
+    _TORCHSDE_AVAILABLE = True
+except ImportError:
+    torchsde = None  # type: ignore[assignment]
+    _TORCHSDE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -220,6 +226,10 @@ class NeuralSDEHead(HeadBase):
         ts = torch.linspace(0.0, horizon * dt, horizon + 1, device=device)
 
         # Solve SDE
+        if not _TORCHSDE_AVAILABLE:
+            raise ImportError(
+                "NeuralSDEHead requires torchsde. Install it with: pip install torchsde>=0.2.6"
+            )
         integrate = torchsde.sdeint_adjoint if self.adjoint else torchsde.sdeint
         ys = integrate(self.sde_func, y0, ts, method=self.solver)
         # ys: (horizon + 1, batch * n_paths, 1)
