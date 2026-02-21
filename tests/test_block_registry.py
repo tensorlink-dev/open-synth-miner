@@ -1,4 +1,8 @@
 """Tests for the block registry introspection features."""
+import dataclasses
+
+import pytest
+
 from src.models.registry import BlockInfo, Registry, discover_components, registry
 
 
@@ -27,9 +31,8 @@ def test_hybrid_has_info():
 
 
 def test_advanced_blocks_registered_after_discovery():
-    """After discover_components, advanced blocks should appear in the registry."""
-    discover_components("src/models/components")
-
+    """After discover_components (run by conftest session fixture), advanced blocks appear."""
+    # The session fixture in conftest.py ensures discovery already ran.
     advanced_names = [
         "rnnblock", "grublock", "resconvblock", "bitcnblock",
         "patchembedding", "unet1dblock", "transformerencoder",
@@ -44,15 +47,24 @@ def test_advanced_blocks_registered_after_discovery():
         assert info.description, f"{name} should have a description"
 
 
-def test_list_blocks_returns_all():
+def test_discover_components_is_idempotent():
+    """discover_components can be called multiple times without raising or duplicating entries."""
+    before = len(registry.blocks)
     discover_components("src/models/components")
+    after = len(registry.blocks)
+    # Because Python caches module imports the decorators don't re-run,
+    # so the count must stay the same (no duplicates, no KeyError).
+    assert after == before, (
+        f"Second discover_components call changed block count: {before} -> {after}"
+    )
+
+
+def test_list_blocks_returns_all():
     all_entries = registry.list_blocks()
     assert len(all_entries) >= 22  # 3 components + 19 advanced + 3 core blocks + 1 hybrid
 
 
 def test_list_blocks_filter_by_kind():
-    discover_components("src/models/components")
-
     blocks_only = registry.list_blocks(kind="block")
     assert all(e.kind == "block" for e in blocks_only)
     assert len(blocks_only) >= 19
@@ -72,8 +84,6 @@ def test_get_info_preserves_shape_metadata():
     assert info.preserves_d_model is True
     assert info.min_seq_len == 1
 
-    discover_components("src/models/components")
-
     patch_info = registry.get_info("patchembedding")
     assert patch_info.preserves_seq_len is False
 
@@ -82,19 +92,15 @@ def test_get_info_preserves_shape_metadata():
 
 
 def test_get_info_unknown_raises():
-    import pytest
-
     with pytest.raises(KeyError):
         registry.get_info("nonexistent_block")
 
 
 def test_summary_produces_table():
-    discover_components("src/models/components")
     table = registry.summary()
     assert "Name" in table
     assert "Kind" in table
     assert "Description" in table
-    # Should contain at least some known block names
     assert "transformerblock" in table
     assert "lstmblock" in table
 
@@ -111,11 +117,6 @@ def test_summary_empty_registry():
 
 
 def test_blockinfo_is_frozen():
-    import pytest
-
     info = registry.get_info("transformerblock")
     with pytest.raises(dataclasses.FrozenInstanceError):
         info.name = "hacked"
-
-
-import dataclasses

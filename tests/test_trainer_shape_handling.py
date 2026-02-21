@@ -53,20 +53,6 @@ class TestPreparePathsForCRPS:
 class TestTrainerShapeContract:
     """Test that Trainer expects SynthModel to return 3D paths."""
 
-    def test_expected_input_shape_from_model(self):
-        """Document expected shape contract: SynthModel returns (batch, n_paths, horizon)."""
-        # This is a documentation test - it verifies the expected contract
-        batch, n_paths, horizon = 4, 50, 60
-
-        # Simulate what SynthModel.forward() should return
-        model_output = torch.randn(batch, n_paths, horizon)
-
-        # Trainer should be able to convert this for CRPS
-        crps_input = prepare_paths_for_crps(model_output)
-
-        assert crps_input.shape == (batch, horizon, n_paths), \
-            "CRPS expects (batch, horizon, n_paths) with ensemble in last dim"
-
     def test_no_2d_handling_needed(self):
         """After refactor, Trainer should NOT need to handle 2D paths.
 
