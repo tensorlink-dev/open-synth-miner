@@ -116,10 +116,10 @@ class TestPriceChangeCalculations:
 
     def test_price_changes_returns_mode(self):
         """Test calculation of basis point returns."""
-        # Simple deterministic example
+        # Geometric 5% increases so each step is exactly 500 bps
         price_paths = np.array([
-            [100.0, 105.0, 110.0, 115.0],  # 5% increases
-            [200.0, 210.0, 220.0, 230.0],  # 5% increases
+            [100.0, 105.0, 110.25, 115.7625],  # true 5% increases
+            [200.0, 210.0, 220.50, 231.5250],  # true 5% increases
         ])
         interval_steps = 1
 
@@ -127,8 +127,8 @@ class TestPriceChangeCalculations:
             price_paths, interval_steps, absolute_price=False
         )
 
-        # Returns in basis points: 5% = 5000 bps * (price_change/start_price)
-        expected_bps = 500.0  # 5% increase = 500 bps
+        # Returns in basis points: 5% increase = 500 bps
+        expected_bps = 500.0
         assert changes.shape == (2, 3), f"Expected (2, 3), got {changes.shape}"
         assert np.allclose(changes, expected_bps, atol=1.0), f"Expected ~{expected_bps} bps, got {changes}"
 

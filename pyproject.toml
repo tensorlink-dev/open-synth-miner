@@ -34,6 +34,8 @@ dependencies = [
 sde = ["torchsde>=0.2.6"]
 dev = [
     "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "coverage-badge>=1.1.0",
     "torchsde>=0.2.6",
 ]
 
@@ -57,3 +59,19 @@ open-synth-miner = "main:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "tests/*",
+    "*/conftest.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]

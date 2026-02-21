@@ -320,14 +320,19 @@ class HorizonHead(HeadBase):
 
     def __init__(
         self,
-        latent_size: int,
+        latent_size: int | None = None,
         horizon_max: int = 48,
         nhead: int = 4,
         n_layers: int = 2,
         d_ff: int | None = None,
         dropout: float = 0.1,
         kv_dim: int | None = None,
+        d_model: int | None = None,
     ) -> None:
+        if latent_size is None and d_model is not None:
+            latent_size = d_model
+        if latent_size is None:
+            raise ValueError("HorizonHead requires latent_size (or d_model as alias)")
         super().__init__()
         self.latent_size = latent_size
         self.horizon_max = horizon_max
