@@ -312,13 +312,20 @@ def test_registry_duplicate_raises():
 
 def test_discover_components():
     from src.models.registry import discover_components, registry
-    before = len(registry.blocks)
+    # conftest's session-scoped autouse fixture already ran discover_components, so the
+    # registry is fully populated before this test starts.  Calling discover_components
+    # a second time is idempotent — it must not raise and must leave all advanced blocks
+    # registered.  We verify by name rather than by count delta.
     discover_components("src/models/components")
-    after = len(registry.blocks)
-    # advanced_blocks.py registers at least one new block beyond the 3 in registry.py
-    assert after > before, (
-        f"discover_components added no new blocks (before={before}, after={after}). "
-        "Expected advanced_blocks.py to register additional blocks."
+    registered = {e.name for e in registry.list_blocks()}
+    # A representative sample of blocks defined in advanced_blocks.py
+    expected_advanced = {
+        "rnnblock", "grublock", "resconvblock", "bitcnblock",
+        "revin", "fourierblock", "layernormblock", "timesnetblock",
+    }
+    missing = expected_advanced - registered
+    assert not missing, (
+        f"discover_components failed to register these advanced blocks: {missing}"
     )
 
 
@@ -1587,13 +1594,13 @@ def test_build_model_latent_mismatch_raises():
 
 
 def test_smoketest_model():
-    from src.models.factory import _smoketest_model, SynthModel, HybridBackbone
+    from src.models.factory import _smoke_test_model, SynthModel, HybridBackbone
     from src.models.registry import LSTMBlock
     from src.models.heads import GBMHead
 
     bb = HybridBackbone(input_size=5, d_model=16, blocks=[LSTMBlock(d_model=16)])
     model = SynthModel(bb, GBMHead(latent_size=16))
-    _smoketest_model(model, input_size=5)  # should not raise
+    _smoke_test_model(model, input_size=5)  # should not raise
 
 
 def test_head_registry_all_8_heads():

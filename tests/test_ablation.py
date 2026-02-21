@@ -130,7 +130,8 @@ class TestRunExperiment:
 
         cfg = OmegaConf.create(_minimal_train_cfg())
 
-        with patch("src.research.experiment_mgr.wandb") as mock_wandb:
+        with patch("src.research.experiment_mgr.wandb") as mock_wandb, \
+             patch("src.tracking.wandb_logger.wandb"):
             mock_wandb.init.return_value = MagicMock()
             mock_wandb.run = MagicMock()
             result = run_experiment(cfg)
@@ -146,7 +147,8 @@ class TestRunExperiment:
 
         cfg = OmegaConf.create(_minimal_train_cfg())
 
-        with patch("src.research.experiment_mgr.wandb"):
+        with patch("src.research.experiment_mgr.wandb"), \
+             patch("src.tracking.wandb_logger.wandb"):
             result = run_experiment(cfg)
 
         assert isinstance(result["model"], SynthModel)
@@ -158,7 +160,8 @@ class TestRunExperiment:
 
         cfg = OmegaConf.create(_minimal_train_cfg())
 
-        with patch("src.research.experiment_mgr.wandb"):
+        with patch("src.research.experiment_mgr.wandb"), \
+             patch("src.tracking.wandb_logger.wandb"):
             result = run_experiment(cfg)
 
         assert "loss" in result["metrics"]
@@ -172,7 +175,8 @@ class TestRunExperiment:
 
         cfg = OmegaConf.create(_minimal_train_cfg())
 
-        with patch("src.research.experiment_mgr.wandb"):
+        with patch("src.research.experiment_mgr.wandb"), \
+             patch("src.tracking.wandb_logger.wandb"):
             result = run_experiment(cfg)
 
         recipe = result["recipe"]
@@ -186,7 +190,8 @@ class TestRunExperiment:
 
         cfg = OmegaConf.create(_minimal_train_cfg())
 
-        with patch("src.research.experiment_mgr.wandb") as mock_wandb:
+        with patch("src.research.experiment_mgr.wandb") as mock_wandb, \
+             patch("src.tracking.wandb_logger.wandb"):
             mock_wandb.init.return_value = MagicMock()
             mock_wandb.run = MagicMock()
             run_experiment(cfg)

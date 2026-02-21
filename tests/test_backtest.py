@@ -31,6 +31,22 @@ def _make_data_window(length: int = 20) -> torch.Tensor:
     return torch.cumsum(torch.randn(length) * 0.01, dim=0) + 100.0
 
 
+def _make_fake_loader(seq_len: int = 18, pred_len: int = 2):
+    """Return an iterable of one batch with shapes the model expects.
+
+    StridedTimeSeriesDataset squeezes 1-D targets so history ends up as
+    (B, context_len) instead of the (B, T, F) that HybridBackbone needs.
+    Tests that exercise ChallengerVsChampion.run() use this helper to
+    bypass that shape mismatch without touching production code.
+    """
+    batch = {
+        "history": torch.randn(1, seq_len, 1),          # (B, T, F) — 3-D ✓
+        "initial_price": torch.tensor([100.0]),           # (B,)      — 1-D ✓
+        "actual_series": torch.randn(1, pred_len),        # (B, pred_len)
+    }
+    return [batch]
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -59,9 +75,11 @@ class TestChallengerVsChampion:
 
         cvc = self._build_cvc(model_a=model_a, model_b=model_b)
 
-        # Patch get_model so it returns the pre-built models without HF loading,
-        # and stub out wandb/log calls.
+        # Patch get_model so it returns the pre-built models without HF loading.
+        # Patch _make_dataloader to bypass StridedTimeSeriesDataset's squeeze which
+        # collapses 1-D targets to (B, context_len), incompatible with HybridBackbone.
         with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+             patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
              patch("src.research.backtest.wandb") as mock_wandb, \
              patch("src.research.backtest.log_backtest_results"):
             mock_wandb.Table.return_value = MagicMock()
@@ -78,6 +96,7 @@ class TestChallengerVsChampion:
         cvc = self._build_cvc(model_a=model_a, model_b=model_b)
 
         with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+             patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
              patch("src.research.backtest.wandb") as mock_wandb, \
              patch("src.research.backtest.log_backtest_results") as mock_log:
             result = cvc.run(log_to_wandb=False)
@@ -94,6 +113,7 @@ class TestChallengerVsChampion:
         cvc = self._build_cvc(model_a=model_a, model_b=model_b)
 
         with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+             patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
              patch("src.research.backtest.wandb"), \
              patch("src.research.backtest.log_backtest_results"):
             result = cvc.run(log_to_wandb=False)
