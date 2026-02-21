@@ -28,6 +28,12 @@ def prepare_paths_for_crps(paths: torch.Tensor) -> torch.Tensor:
     torch.Tensor
         Transposed paths of shape (batch, horizon, n_paths) ready for CRPS computation
     """
+    if paths.ndim != 3:
+        raise RuntimeError(
+            f"prepare_paths_for_crps expects a 3D tensor (batch, n_paths, horizon), "
+            f"got {paths.ndim}D tensor with shape {tuple(paths.shape)}. "
+            "This likely indicates a bug in SynthModel.forward()."
+        )
     return paths.transpose(1, 2)
 
 
