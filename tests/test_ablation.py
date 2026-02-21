@@ -91,11 +91,13 @@ class TestAblationExperimentTrain:
         assert "only" in exp.results
 
     def test_invalid_mode_raises(self):
-        """Unknown mode should raise ValueError during run()."""
+        """Unknown mode should raise ValueError when run() is called."""
         from src.research.ablation import AblationExperiment
 
+        # __init__ does not validate mode; the error surfaces on run().
+        exp = AblationExperiment(configs={"m": _minimal_train_cfg()}, mode="foobar")
         with pytest.raises(ValueError, match="Unknown mode"):
-            AblationExperiment(configs={"m": _minimal_train_cfg()}, mode="foobar")
+            exp.run(train_loader=list(_fake_loader(1)), val_loader=list(_fake_loader(1)))
 
     def test_device_auto_falls_back_to_cpu(self):
         """device='auto' should resolve to cpu when CUDA is unavailable."""

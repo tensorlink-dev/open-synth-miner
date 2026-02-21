@@ -1739,6 +1739,7 @@ if __name__ == "__main__":
     run("crps_perfect_forecast",           test_crps_ensemble_perfect_forecast)
     run("crps_batch_horizon_shape",        test_crps_ensemble_batch_horizon)
     run("crps_worse_is_higher",            test_crps_ensemble_worse_is_higher)
+    run("crps_analytical_gaussian",        test_crps_ensemble_analytical_gaussian)
     run("afcrps_all_alphas",               test_afcrps_ensemble)
     run("afcrps_alpha0_matches_crps",      test_afcrps_alpha0_matches_crps)
     run("log_likelihood_shape",            test_log_likelihood_shapes)

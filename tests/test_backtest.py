@@ -44,7 +44,10 @@ class TestChallengerVsChampion:
             champion_cfg=model_b,
             data_window=data_window,
             time_increment=60,
-            horizon=4,
+            # ChallengerVsChampion._make_dataloader() hardcodes pred_len=2,
+            # so actual_series from the loader is always 2 steps long.
+            # horizon must match so the scorer receives equal-length arrays.
+            horizon=2,
             n_paths=10,
             device="cpu",
         )
@@ -112,6 +115,7 @@ class TestChallengerVsChampion:
         """Two identical path tensors should yield zero variance spread."""
         model_a = _make_synth_model()
         cvc = self._build_cvc(model_a=model_a, model_b=model_a)
-        paths = torch.randn(1, 50, 4)
+        # horizon=2 matches _build_cvc config (pred_len=2 hardcoded in _make_dataloader)
+        paths = torch.randn(1, 50, 2)
         spread = cvc._variance_spread(paths, paths)
         assert spread == pytest.approx(0.0, abs=1e-6)

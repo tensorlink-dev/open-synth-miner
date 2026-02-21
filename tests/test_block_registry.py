@@ -108,7 +108,14 @@ def test_summary_produces_table():
 def test_summary_filter_by_kind():
     table = registry.summary(kind="component")
     assert "component" in table
-    assert "block" not in table.split("\n", 2)[-1]  # not in data rows
+    # Every registered block name must be absent from a component-only summary.
+    # Searching for the word "block" would be fragile (could appear in descriptions);
+    # instead we check that no known block names appear in the table.
+    block_names = [e.name for e in registry.list_blocks(kind="block")]
+    for name in block_names:
+        assert name not in table, (
+            f"Block '{name}' should not appear in a component-only summary"
+        )
 
 
 def test_summary_empty_registry():

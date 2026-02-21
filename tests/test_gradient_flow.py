@@ -55,12 +55,9 @@ class TestTransformerBlockGradients:
 
     def test_gradient_flows_from_input(self):
         block = TransformerBlock(d_model=32, nhead=4, dropout=0.0)
-        x = _randn(requires_grad=True)
-        block(_randn()).sum()  # warm-up not needed — just verify input grad
-        x2 = _randn(2, 16, 32)
-        x2.requires_grad_(True)
-        block(x2).sum().backward()
-        assert x2.grad is not None
+        x = torch.randn(2, 16, 32, requires_grad=True)
+        block(x).sum().backward()
+        assert x.grad is not None
 
     def test_output_depends_on_input(self):
         """Output should differ for different inputs (block is not constant)."""
@@ -225,8 +222,7 @@ class TestTrainerTrainingLoop:
         assert val_crps < 1e6, f"val_crps suspiciously large: {val_crps}"
 
     def test_trainer_crps_alpha_none_uses_standard_crps(self):
-        """crps_alpha=None should use standard CRPS (not afCRPS)."""
-        from src.research.metrics import crps_ensemble
+        """crps_alpha=None should use standard CRPS (not afCRPS) without errors."""
         bb = HybridBackbone(
             input_size=3, d_model=16, blocks=[LSTMBlock(d_model=16)]
         )
