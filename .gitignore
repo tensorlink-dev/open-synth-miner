@@ -5,3 +5,6 @@ __pycache__/
 *.egg-info/
 uv.lock
 .venv/
+.coverage
+htmlcov/
+coverage.xml
