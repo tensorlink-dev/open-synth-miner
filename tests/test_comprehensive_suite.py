@@ -3,13 +3,10 @@
 
 Tests every major module and outputs a formatted pass/fail report.
 
-Usage:
-    python tests/test_comprehensive_suite.py   # standalone runner (primary interface)
-
-Note: test functions use the ``_test_`` prefix and are intentionally NOT
-collected by pytest (which only picks up ``test_*`` names).  Use the
-standalone runner above to execute this suite.  The pre-existing
-``tests/test_*.py`` files continue to be collected by pytest normally.
+All test functions use the ``test_`` prefix and are collected by pytest
+normally (``python -m pytest tests/``).  The ``if __name__ == "__main__"``
+block also allows running this file as a standalone script with a formatted
+pass/fail summary.
 """
 from __future__ import annotations
 
@@ -201,14 +198,14 @@ def _backbone(input_size: int = 3, d_model: int = 32):
 # SECTION 1: Registry
 # =============================================================================
 
-def _test_registry_instantiation():
+def test_registry_instantiation():
     from src.models.registry import Registry, registry
     r = Registry()
     assert hasattr(r, "components") and hasattr(r, "blocks") and hasattr(r, "hybrids")
     assert isinstance(registry, Registry)
 
 
-def _test_registry_block_register_and_get():
+def test_registry_block_register_and_get():
     from src.models.registry import Registry
     r = Registry()
 
@@ -225,7 +222,7 @@ def _test_registry_block_register_and_get():
     assert info.description == "Test"
 
 
-def _test_registry_component_register():
+def test_registry_component_register():
     from src.models.registry import Registry
     r = Registry()
 
@@ -237,7 +234,7 @@ def _test_registry_component_register():
     assert r.get_component("mycomp_s1") is MyComp
 
 
-def _test_registry_hybrid_register():
+def test_registry_hybrid_register():
     from src.models.registry import Registry
     r = Registry()
 
@@ -249,7 +246,7 @@ def _test_registry_hybrid_register():
     assert r.get_hybrid("myhybrid_s1") is my_h
 
 
-def _test_registry_list_blocks():
+def test_registry_list_blocks():
     from src.models.registry import registry
     blocks = registry.list_blocks(kind="block")
     assert len(blocks) > 0
@@ -258,7 +255,7 @@ def _test_registry_list_blocks():
     assert all(c.kind == "component" for c in comps)
 
 
-def _test_registry_summary():
+def test_registry_summary():
     from src.models.registry import registry
     s = registry.summary()
     assert isinstance(s, str) and len(s) > 0
@@ -266,7 +263,7 @@ def _test_registry_summary():
     assert "block" in s_blocks
 
 
-def _test_registry_recipe_hash():
+def test_registry_recipe_hash():
     from src.models.registry import Registry
     h1 = Registry.recipe_hash({"a": 1, "b": [2, 3]})
     h2 = Registry.recipe_hash({"b": [2, 3], "a": 1})
@@ -276,13 +273,13 @@ def _test_registry_recipe_hash():
     assert h3 != h1
 
 
-def _test_registry_attribute_access():
+def test_registry_attribute_access():
     from src.models.registry import registry, TransformerBlock, LSTMBlock
     assert registry.TransformerBlock is TransformerBlock
     assert registry.LSTMBlock is LSTMBlock
 
 
-def _test_registry_missing_raises():
+def test_registry_missing_raises():
     from src.models.registry import registry
     try:
         registry.get_block("no_such_block_xyzabc")
@@ -296,7 +293,7 @@ def _test_registry_missing_raises():
         pass
 
 
-def _test_registry_duplicate_raises():
+def test_registry_duplicate_raises():
     from src.models.registry import Registry
     r = Registry()
 
@@ -313,15 +310,22 @@ def _test_registry_duplicate_raises():
         pass
 
 
-def _test_discover_components():
+def test_discover_components():
     from src.models.registry import discover_components, registry
-    before = len(registry.blocks)
+    # conftest's session-scoped autouse fixture already ran discover_components, so the
+    # registry is fully populated before this test starts.  Calling discover_components
+    # a second time is idempotent — it must not raise and must leave all advanced blocks
+    # registered.  We verify by name rather than by count delta.
     discover_components("src/models/components")
-    after = len(registry.blocks)
-    # advanced_blocks.py registers at least one new block beyond the 3 in registry.py
-    assert after > before, (
-        f"discover_components added no new blocks (before={before}, after={after}). "
-        "Expected advanced_blocks.py to register additional blocks."
+    registered = {e.name for e in registry.list_blocks()}
+    # A representative sample of blocks defined in advanced_blocks.py
+    expected_advanced = {
+        "rnnblock", "grublock", "resconvblock", "bitcnblock",
+        "revin", "fourierblock", "layernormblock", "timesnetblock",
+    }
+    missing = expected_advanced - registered
+    assert not missing, (
+        f"discover_components failed to register these advanced blocks: {missing}"
     )
 
 
@@ -329,43 +333,52 @@ def _test_discover_components():
 # SECTION 2: Built-in Blocks (registry.py)
 # =============================================================================
 
-def _test_transformer_block():
+def test_transformer_block():
     from src.models.registry import TransformerBlock
-    b = TransformerBlock(d_model=32, nhead=4)
+    b = TransformerBlock(d_model=32, nhead=4, dropout=0.0)
+    b.eval()
     x = _t()
     out = b(x)
     assert out.shape == x.shape
+    # Block should transform data, not act as an identity.
+    assert not torch.allclose(out, x, atol=1e-3), "TransformerBlock should not be an identity"
 
 
-def _test_lstm_block():
+def test_lstm_block():
     from src.models.registry import LSTMBlock
     b = LSTMBlock(d_model=32, num_layers=2)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "LSTMBlock should not be an identity"
 
 
-def _test_sde_evolution_block():
+def test_sde_evolution_block():
     from src.models.registry import SDEEvolutionBlock
-    b = SDEEvolutionBlock(d_model=32, hidden=64)
+    b = SDEEvolutionBlock(d_model=32, hidden=64, dropout=0.0)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "SDEEvolutionBlock should not be an identity"
 
 
-def _test_custom_attention():
+def test_custom_attention():
     from src.models.registry import CustomAttention
     c = CustomAttention(d_model=32, nhead=4)
     x = _t()
     assert c(x).shape == x.shape
 
 
-def _test_gated_mlp():
+def test_gated_mlp():
     from src.models.registry import GatedMLP
     m = GatedMLP(d_model=32, expansion=4)
     x = _t()
     assert m(x).shape == x.shape
 
 
-def _test_patch_merging():
+def test_patch_merging():
     from src.models.registry import PatchMerging
     pm = PatchMerging(d_model=32)
     x = _t(seq=16)
@@ -377,35 +390,47 @@ def _test_patch_merging():
 # SECTION 3: Advanced Blocks (advanced_blocks.py)
 # =============================================================================
 
-def _test_rnn_block():
+def test_rnn_block():
     from src.models.components.advanced_blocks import RNNBlock
     b = RNNBlock(d_model=32, num_layers=2)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "RNNBlock should not be an identity"
 
 
-def _test_gru_block():
+def test_gru_block():
     from src.models.components.advanced_blocks import GRUBlock
     b = GRUBlock(d_model=32, num_layers=1)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "GRUBlock should not be an identity"
 
 
-def _test_resconv_block():
+def test_resconv_block():
     from src.models.components.advanced_blocks import ResConvBlock
     b = ResConvBlock(d_model=32, kernel_size=3)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "ResConvBlock should not be an identity"
 
 
-def _test_bitcn_block():
+def test_bitcn_block():
     from src.models.components.advanced_blocks import BiTCNBlock
     b = BiTCNBlock(d_model=32, kernel_size=3, dilation=2)
+    b.eval()
     x = _t()
-    assert b(x).shape == x.shape
+    out = b(x)
+    assert out.shape == x.shape
+    assert not torch.allclose(out, x, atol=1e-3), "BiTCNBlock should not be an identity"
 
 
-def _test_patch_embedding_changes_seq():
+def test_patch_embedding_changes_seq():
     from src.models.components.advanced_blocks import PatchEmbedding
     b = PatchEmbedding(d_model=32, patch_size=4)
     x = _t(seq=32)
@@ -415,7 +440,7 @@ def _test_patch_embedding_changes_seq():
     assert out.shape[1] < 32  # seq len reduced by patch
 
 
-def _test_unet1d_block():
+def test_unet1d_block():
     from src.models.components.advanced_blocks import Unet1DBlock
     b = Unet1DBlock(d_model=32)
     x = _t(seq=16)
@@ -423,21 +448,21 @@ def _test_unet1d_block():
     assert out.shape == x.shape
 
 
-def _test_transformer_encoder_adapter():
+def test_transformer_encoder_adapter():
     from src.models.components.advanced_blocks import TransformerEncoderAdapter
     b = TransformerEncoderAdapter(d_model=32, nhead=4, num_layers=2)
     x = _t()
     assert b(x).shape == x.shape
 
 
-def _test_transformer_decoder_adapter():
+def test_transformer_decoder_adapter():
     from src.models.components.advanced_blocks import TransformerDecoderAdapter
     b = TransformerDecoderAdapter(d_model=32, nhead=4, num_layers=2)
     x = _t()
     assert b(x).shape == x.shape
 
 
-def _test_fourier_block():
+def test_fourier_block():
     from src.models.components.advanced_blocks import FourierBlock
     b = FourierBlock(d_model=32, modes=8)
     x = _t(seq=32)
@@ -445,7 +470,7 @@ def _test_fourier_block():
     assert out.shape == x.shape
 
 
-def _test_last_step_adapter_modes():
+def test_last_step_adapter_modes():
     from src.models.components.advanced_blocks import LastStepAdapter
     x = _t()
     for mode in ("last", "mean", "max"):
@@ -454,7 +479,7 @@ def _test_last_step_adapter_modes():
         assert out.ndim == 3
 
 
-def _test_revin_norm_denorm():
+def test_revin_norm_denorm():
     from src.models.components.advanced_blocks import RevIN
     b = RevIN(d_model=32)
     x = _t()
@@ -469,7 +494,7 @@ def _test_revin_norm_denorm():
     )
 
 
-def _test_revin_invalid_mode():
+def test_revin_invalid_mode():
     from src.models.components.advanced_blocks import RevIN
     b = RevIN(d_model=32)
     x = _t()
@@ -481,7 +506,7 @@ def _test_revin_invalid_mode():
         pass
 
 
-def _test_flexible_patch_embed():
+def test_flexible_patch_embed():
     from src.models.components.advanced_blocks import FlexiblePatchEmbed
     b = FlexiblePatchEmbed(d_model=32, patch_len=8, stride=4, in_channels=3, channel_independence=False)
     x = torch.randn(2, 64, 3)
@@ -489,7 +514,7 @@ def _test_flexible_patch_embed():
     assert out.ndim == 3 and out.shape[0] == 2 and out.shape[2] == 32
 
 
-def _test_flexible_patch_embed_channel_independence():
+def test_flexible_patch_embed_channel_independence():
     from src.models.components.advanced_blocks import FlexiblePatchEmbed
     batch, seq, channels = 2, 64, 3
     b = FlexiblePatchEmbed(d_model=32, patch_len=8, stride=4, channel_independence=True)
@@ -501,7 +526,7 @@ def _test_flexible_patch_embed_channel_independence():
     assert out.shape[2] == 32
 
 
-def _test_channel_rejoin_mean():
+def test_channel_rejoin_mean():
     from src.models.components.advanced_blocks import ChannelRejoin
     num_channels = 3
     b = ChannelRejoin(num_channels=num_channels, mode="mean")
@@ -511,7 +536,7 @@ def _test_channel_rejoin_mean():
     assert out.shape == (2, 16, 32)
 
 
-def _test_dlinear_block():
+def test_dlinear_block():
     from src.models.components.advanced_blocks import DLinearBlock
     b = DLinearBlock(d_model=32, kernel_size=5)
     x = _t()
@@ -519,7 +544,7 @@ def _test_dlinear_block():
     assert out.shape == x.shape
 
 
-def _test_layernorm_block():
+def test_layernorm_block():
     from src.models.components.advanced_blocks import LayerNormBlock
     b = LayerNormBlock(d_model=32)
     x = _t()
@@ -529,7 +554,7 @@ def _test_layernorm_block():
     assert out.isfinite().all()
 
 
-def _test_timesnet_block():
+def test_timesnet_block():
     from src.models.components.advanced_blocks import TimesNetBlock
     b = TimesNetBlock(d_model=32, top_k=3)
     # min_seq_len=4
@@ -542,7 +567,7 @@ def _test_timesnet_block():
 # SECTION 4: Heads
 # =============================================================================
 
-def _test_gbm_head_shapes_and_positivity():
+def test_gbm_head_shapes_and_positivity():
     from src.models.heads import GBMHead
     h = GBMHead(latent_size=32)
     x = torch.randn(4, 32)
@@ -551,7 +576,7 @@ def _test_gbm_head_shapes_and_positivity():
     assert (sigma > 0).all()
 
 
-def _test_sde_head():
+def test_sde_head():
     from src.models.heads import SDEHead
     h = SDEHead(latent_size=32, hidden=64)
     x = torch.randn(4, 32)
@@ -560,7 +585,7 @@ def _test_sde_head():
     assert (sigma > 0).all()
 
 
-def _test_horizon_head():
+def test_horizon_head():
     from src.models.heads import HorizonHead
     h = HorizonHead(latent_size=32, horizon_max=48, nhead=4, n_layers=2)
     x = torch.randn(4, 16, 32)
@@ -569,7 +594,7 @@ def _test_horizon_head():
     assert (sigma > 0).all()
 
 
-def _test_horizon_head_kv_compression():
+def test_horizon_head_kv_compression():
     from src.models.heads import HorizonHead
     h = HorizonHead(latent_size=32, horizon_max=24, nhead=4, kv_dim=16)
     x = torch.randn(2, 32, 32)
@@ -577,7 +602,7 @@ def _test_horizon_head_kv_compression():
     assert mu.shape == (2, 8) and sigma.shape == (2, 8)
 
 
-def _test_horizon_head_clips_to_max():
+def test_horizon_head_clips_to_max():
     from src.models.heads import HorizonHead
     import logging
     h = HorizonHead(latent_size=32, horizon_max=10, nhead=4)
@@ -587,7 +612,7 @@ def _test_horizon_head_clips_to_max():
     assert mu.shape == (2, 10)  # clipped to horizon_max
 
 
-def _test_simple_horizon_head_all_pools():
+def test_simple_horizon_head_all_pools():
     from src.models.heads import SimpleHorizonHead
     for pool in ("mean", "max", "mean+max"):
         h = SimpleHorizonHead(latent_size=32, horizon_max=48, pool_type=pool)
@@ -597,7 +622,7 @@ def _test_simple_horizon_head_all_pools():
         assert (sigma > 0).all()
 
 
-def _test_simple_horizon_head_invalid_pool():
+def test_simple_horizon_head_invalid_pool():
     from src.models.heads import SimpleHorizonHead
     try:
         SimpleHorizonHead(latent_size=32, pool_type="invalid_pool_xyz")
@@ -606,7 +631,7 @@ def _test_simple_horizon_head_invalid_pool():
         pass
 
 
-def _test_mixture_density_head():
+def test_mixture_density_head():
     from src.models.heads import MixtureDensityHead
     h = MixtureDensityHead(latent_size=32, n_components=3, hidden=64)
     x = torch.randn(4, 32)
@@ -616,7 +641,7 @@ def _test_mixture_density_head():
     assert torch.allclose(weights.sum(dim=-1), torch.ones(4), atol=1e-5)
 
 
-def _test_vol_term_structure_head():
+def test_vol_term_structure_head():
     from src.models.heads import VolTermStructureHead
     h = VolTermStructureHead(latent_size=32, hidden=64)
     x = torch.randn(4, 32)
@@ -625,7 +650,7 @@ def _test_vol_term_structure_head():
     assert (sigma_seq > 0).all()
 
 
-def _test_neural_bridge_head_no_price():
+def test_neural_bridge_head_no_price():
     from src.models.heads import NeuralBridgeHead
     h = NeuralBridgeHead(latent_size=32, micro_steps=12, hidden_dim=64)
     x = torch.randn(4, 32)
@@ -639,7 +664,7 @@ def _test_neural_bridge_head_no_price():
     assert torch.isfinite(macro_ret).all()
 
 
-def _test_neural_bridge_head_with_price():
+def test_neural_bridge_head_with_price():
     from src.models.heads import NeuralBridgeHead
     h = NeuralBridgeHead(latent_size=32, micro_steps=8)
     x = torch.randn(3, 32)
@@ -650,7 +675,7 @@ def _test_neural_bridge_head_with_price():
     assert (prices_out > 0).all()  # prices should be positive after exp
 
 
-def _test_neural_sde_head():
+def test_neural_sde_head():
     from src.models.heads import NeuralSDEHead
     with torch.no_grad():
         h = NeuralSDEHead(latent_size=32, hidden=32, solver="euler", adjoint=False)
@@ -667,7 +692,7 @@ def _test_neural_sde_head():
 # SECTION 5: HybridBackbone & ParallelFusion
 # =============================================================================
 
-def _test_hybrid_backbone_last_step():
+def test_hybrid_backbone_last_step():
     from src.models.factory import HybridBackbone
     from src.models.registry import TransformerBlock
     bb = HybridBackbone(input_size=3, d_model=32, blocks=[TransformerBlock(d_model=32)])
@@ -676,7 +701,7 @@ def _test_hybrid_backbone_last_step():
     assert out.shape == (4, 32), f"got {out.shape}"
 
 
-def _test_hybrid_backbone_forward_sequence():
+def test_hybrid_backbone_forward_sequence():
     from src.models.factory import HybridBackbone
     from src.models.registry import LSTMBlock
     bb = HybridBackbone(input_size=3, d_model=32, blocks=[LSTMBlock(d_model=32)])
@@ -685,7 +710,7 @@ def _test_hybrid_backbone_forward_sequence():
     assert out.shape == (4, 16, 32), f"got {out.shape}"
 
 
-def _test_hybrid_backbone_multiple_blocks():
+def test_hybrid_backbone_multiple_blocks():
     from src.models.factory import HybridBackbone
     from src.models.registry import TransformerBlock, LSTMBlock, SDEEvolutionBlock
     bb = HybridBackbone(
@@ -698,7 +723,7 @@ def _test_hybrid_backbone_multiple_blocks():
     assert out.shape == (2, 32)
 
 
-def _test_hybrid_backbone_insert_layernorm():
+def test_hybrid_backbone_insert_layernorm():
     from src.models.factory import HybridBackbone
     from src.models.registry import TransformerBlock, LSTMBlock
     bb = HybridBackbone(
@@ -714,7 +739,7 @@ def _test_hybrid_backbone_insert_layernorm():
     assert len(bb.layers) == 3
 
 
-def _test_hybrid_backbone_empty_raises():
+def test_hybrid_backbone_empty_raises():
     from src.models.factory import HybridBackbone
     try:
         HybridBackbone(input_size=3, d_model=32, blocks=[])
@@ -723,14 +748,14 @@ def _test_hybrid_backbone_empty_raises():
         pass
 
 
-def _test_hybrid_backbone_output_dim():
+def test_hybrid_backbone_output_dim():
     from src.models.factory import HybridBackbone
     from src.models.registry import TransformerBlock
     bb = HybridBackbone(input_size=5, d_model=64, blocks=[TransformerBlock(d_model=64, nhead=4)])
     assert bb.output_dim == 64
 
 
-def _test_parallel_fusion_gating():
+def test_parallel_fusion_gating():
     from src.models.factory import ParallelFusion
     paths = nn.ModuleList([nn.Linear(32, 32), nn.Linear(32, 32)])
     fusion = ParallelFusion(list(paths), merge_strategy="gating")
@@ -739,7 +764,7 @@ def _test_parallel_fusion_gating():
     assert out.shape == (4, 32)
 
 
-def _test_parallel_fusion_concat():
+def test_parallel_fusion_concat():
     from src.models.factory import ParallelFusion
     paths = [nn.Linear(32, 16), nn.Linear(32, 16)]
     fusion = ParallelFusion(paths, merge_strategy="concat")
@@ -748,7 +773,7 @@ def _test_parallel_fusion_concat():
     assert out.shape == (4, 32)
 
 
-def _test_parallel_fusion_too_few_paths_raises():
+def test_parallel_fusion_too_few_paths_raises():
     from src.models.factory import ParallelFusion
     try:
         ParallelFusion([nn.Linear(32, 32)], merge_strategy="gating")
@@ -757,7 +782,7 @@ def _test_parallel_fusion_too_few_paths_raises():
         pass
 
 
-def _test_parallel_fusion_bad_strategy_raises():
+def test_parallel_fusion_bad_strategy_raises():
     from src.models.factory import ParallelFusion
     try:
         ParallelFusion([nn.Linear(32, 32), nn.Linear(32, 32)], merge_strategy="sum")
@@ -775,7 +800,7 @@ def _synth(head):
     return SynthModel(_backbone(), head)
 
 
-def _test_synth_gbm():
+def test_synth_gbm():
     from src.models.heads import GBMHead
     model = _synth(GBMHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -785,7 +810,7 @@ def _test_synth_gbm():
     assert (paths > 0).all()
 
 
-def _test_synth_sde():
+def test_synth_sde():
     from src.models.heads import SDEHead
     model = _synth(SDEHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 50.0
@@ -794,7 +819,7 @@ def _test_synth_sde():
     assert paths.shape == (2, 8, 6)
 
 
-def _test_synth_horizon():
+def test_synth_horizon():
     from src.models.heads import HorizonHead
     model = _synth(HorizonHead(latent_size=32, horizon_max=48, nhead=4))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -803,7 +828,7 @@ def _test_synth_horizon():
     assert paths.shape == (2, 10, 12)
 
 
-def _test_synth_simple_horizon():
+def test_synth_simple_horizon():
     from src.models.heads import SimpleHorizonHead
     model = _synth(SimpleHorizonHead(latent_size=32, horizon_max=48))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -812,7 +837,7 @@ def _test_synth_simple_horizon():
     assert paths.shape == (2, 10, 12)
 
 
-def _test_synth_mixture_density():
+def test_synth_mixture_density():
     from src.models.heads import MixtureDensityHead
     model = _synth(MixtureDensityHead(latent_size=32, n_components=3))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -821,7 +846,7 @@ def _test_synth_mixture_density():
     assert paths.shape == (2, 10, 8)
 
 
-def _test_synth_vol_term_structure():
+def test_synth_vol_term_structure():
     from src.models.heads import VolTermStructureHead
     model = _synth(VolTermStructureHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -830,7 +855,7 @@ def _test_synth_vol_term_structure():
     assert paths.shape == (2, 10, 8)
 
 
-def _test_synth_neural_bridge():
+def test_synth_neural_bridge():
     from src.models.heads import NeuralBridgeHead
     model = _synth(NeuralBridgeHead(latent_size=32, micro_steps=8))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -839,7 +864,7 @@ def _test_synth_neural_bridge():
     assert paths.shape == (2, 10, 8)
 
 
-def _test_synth_neural_sde():
+def test_synth_neural_sde():
     from src.models.heads import NeuralSDEHead
     model = _synth(NeuralSDEHead(latent_size=32, hidden=32, solver="euler"))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
@@ -848,7 +873,7 @@ def _test_synth_neural_sde():
     assert paths.shape == (2, 5, 4)
 
 
-def _test_synth_shape_contract_all_heads():
+def test_synth_shape_contract_all_heads():
     """Shape invariant: (batch, n_paths, horizon) for every head type."""
     from src.models.factory import SynthModel
     from src.models.heads import (
@@ -882,7 +907,7 @@ def _test_synth_shape_contract_all_heads():
 # SECTION 7: Path Simulators
 # =============================================================================
 
-def _test_simulate_gbm_paths():
+def test_simulate_gbm_paths():
     from src.models.factory import simulate_gbm_paths
     price = torch.ones(4) * 100.0
     mu = torch.zeros(4)
@@ -892,7 +917,7 @@ def _test_simulate_gbm_paths():
     assert (paths > 0).all()
 
 
-def _test_simulate_gbm_positivity_extremes():
+def test_simulate_gbm_positivity_extremes():
     from src.models.factory import simulate_gbm_paths
     price = torch.ones(2) * 100.0
     mu = torch.tensor([10.0, -10.0])
@@ -902,7 +927,7 @@ def _test_simulate_gbm_positivity_extremes():
     assert (paths > 0).all()
 
 
-def _test_simulate_gbm_dt():
+def test_simulate_gbm_dt():
     from src.models.factory import simulate_gbm_paths
     price = torch.ones(2) * 100.0
     mu, sigma = torch.zeros(2), torch.ones(2) * 0.01
@@ -911,7 +936,7 @@ def _test_simulate_gbm_dt():
     assert p1.shape == p2.shape == (2, 50, 8)
 
 
-def _test_simulate_horizon_paths():
+def test_simulate_horizon_paths():
     from src.models.factory import simulate_horizon_paths
     batch, horizon = 4, 12
     price = torch.ones(batch) * 100.0
@@ -922,7 +947,7 @@ def _test_simulate_horizon_paths():
     assert (paths > 0).all()
 
 
-def _test_simulate_bridge_paths():
+def test_simulate_bridge_paths():
     from src.models.factory import simulate_bridge_paths
     batch, steps = 4, 12
     price = torch.ones(batch) * 100.0
@@ -933,7 +958,7 @@ def _test_simulate_bridge_paths():
     assert (paths > 0).all()
 
 
-def _test_simulate_mixture_paths():
+def test_simulate_mixture_paths():
     from src.models.factory import simulate_mixture_paths
     batch, K = 4, 3
     price = torch.ones(batch) * 100.0
@@ -949,7 +974,7 @@ def _test_simulate_mixture_paths():
 # SECTION 8: Data Pipeline
 # =============================================================================
 
-def _test_mock_data_source():
+def test_mock_data_source():
     from src.data.market_data_loader import MockDataSource, AssetData
     src = MockDataSource(length=300, freq="5min", seed=42)
     assets = src.load_data(["BTC", "ETH", "SYNTH"])
@@ -961,20 +986,20 @@ def _test_mock_data_source():
         assert (np.array(a.prices) > 0).all()
 
 
-def _test_mock_data_source_reproducible():
+def test_mock_data_source_reproducible():
     from src.data.market_data_loader import MockDataSource
     s1 = MockDataSource(length=100, seed=7).load_data(["X"])[0]
     s2 = MockDataSource(length=100, seed=7).load_data(["X"])[0]
     np.testing.assert_array_equal(s1.prices, s2.prices)
 
 
-def _test_zscore_engineer_feature_dim():
+def test_zscore_engineer_feature_dim():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     assert eng.feature_dim == 3
 
 
-def _test_zscore_engineer_prepare_cache():
+def test_zscore_engineer_prepare_cache():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer(short_win=10, long_win=50)
     prices = np.linspace(100, 110, 300)
@@ -983,7 +1008,7 @@ def _test_zscore_engineer_prepare_cache():
     assert cache["features"].shape == (300, 3)
 
 
-def _test_zscore_engineer_make_input():
+def test_zscore_engineer_make_input():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
@@ -993,7 +1018,7 @@ def _test_zscore_engineer_make_input():
     assert torch.isfinite(inp).all()
 
 
-def _test_zscore_engineer_make_target():
+def test_zscore_engineer_make_target():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
@@ -1002,7 +1027,7 @@ def _test_zscore_engineer_make_target():
     assert tgt.shape == (1, 8)
 
 
-def _test_zscore_engineer_get_volatility():
+def test_zscore_engineer_get_volatility():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
@@ -1011,7 +1036,7 @@ def _test_zscore_engineer_get_volatility():
     assert isinstance(vol, float) and vol >= 0
 
 
-def _test_zscore_engineer_clean_prices():
+def test_zscore_engineer_clean_prices():
     from src.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     # Contains NaN, inf, and zero — should all be cleaned
@@ -1021,13 +1046,13 @@ def _test_zscore_engineer_clean_prices():
     assert np.all(cleaned > 0)
 
 
-def _test_wavelet_engineer_feature_dim():
+def test_wavelet_engineer_feature_dim():
     from src.data.market_data_loader import WaveletEngineer
     eng = WaveletEngineer()
     assert eng.feature_dim == 5
 
 
-def _test_wavelet_engineer_make_input():
+def test_wavelet_engineer_make_input():
     from src.data.market_data_loader import WaveletEngineer
     eng = WaveletEngineer(wavelet="db4", level=3)
     prices = np.linspace(100, 110, 300)
@@ -1037,7 +1062,7 @@ def _test_wavelet_engineer_make_input():
     assert torch.isfinite(inp).all()
 
 
-def _test_asset_data_dataclass():
+def test_asset_data_dataclass():
     from src.data.market_data_loader import AssetData
     ts = np.array([0, 1, 2])
     prices = np.array([100.0, 101.0, 102.0])
@@ -1046,7 +1071,7 @@ def _test_asset_data_dataclass():
     assert a.covariates is None
 
 
-def _test_market_dataset():
+def test_market_dataset():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
     src = MockDataSource(length=500, freq="5min", seed=10)
     assets = src.load_data(["BTC"])
@@ -1059,7 +1084,7 @@ def _test_market_dataset():
     assert sample["inputs"].shape[1] == 32  # input_len
 
 
-def _test_market_dataset_vol_buckets():
+def test_market_dataset_vol_buckets():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
     src = MockDataSource(length=500, freq="5min", seed=42)
     assets = src.load_data(["SYNTH"])
@@ -1070,7 +1095,7 @@ def _test_market_dataset_vol_buckets():
     assert set(buckets).issubset({0, 1, 2})
 
 
-def _test_market_data_loader_construction():
+def test_market_data_loader_construction():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=600, freq="5min", seed=99)
     eng = ZScoreEngineer()
@@ -1082,7 +1107,7 @@ def _test_market_data_loader_construction():
     assert len(loader.dataset) > 0
 
 
-def _test_market_data_loader_get_price_series():
+def test_market_data_loader_get_price_series():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=400, freq="5min", seed=5)
     eng = ZScoreEngineer()
@@ -1098,7 +1123,7 @@ def _test_market_data_loader_get_price_series():
     assert len(sliced) == 40
 
 
-def _test_market_data_loader_static_holdout():
+def test_market_data_loader_static_holdout():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     # Use a large dataset so all vol_buckets have ≥2 members for StratifiedShuffleSplit
     src = MockDataSource(length=3000, freq="5min", seed=7)
@@ -1116,7 +1141,7 @@ def _test_market_data_loader_static_holdout():
     assert len(train_dl) >= len(val_dl), "expected train ≥ val batches"
 
 
-def _test_market_data_loader_multiple_assets():
+def test_market_data_loader_multiple_assets():
     from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=500, freq="5min", seed=42)
     eng = ZScoreEngineer()
@@ -1127,7 +1152,7 @@ def _test_market_data_loader_multiple_assets():
     assert len(loader.assets_data) == 2
 
 
-def _test_market_data_loader_wavelet():
+def test_market_data_loader_wavelet():
     from src.data.market_data_loader import MockDataSource, WaveletEngineer, MarketDataLoader
     src = MockDataSource(length=400, freq="5min", seed=1)
     eng = WaveletEngineer(wavelet="db4", level=3)
@@ -1142,7 +1167,7 @@ def _test_market_data_loader_wavelet():
 # SECTION 9: StridedTimeSeriesDataset + FeatureEngineerBase
 # =============================================================================
 
-def _test_strided_dataset_basic():
+def test_strided_dataset_basic():
     from src.data.base_dataset import StridedTimeSeriesDataset
     series = torch.cumsum(torch.randn(200), dim=0)
     ds = StridedTimeSeriesDataset(series, context_len=32, pred_len=8, stride=4)
@@ -1153,7 +1178,7 @@ def _test_strided_dataset_basic():
     assert s["actual_series"].shape == (8,)
 
 
-def _test_strided_dataset_2d_target():
+def test_strided_dataset_2d_target():
     from src.data.base_dataset import StridedTimeSeriesDataset
     # 2D series: (T, features)
     series = torch.randn(150, 3)
@@ -1163,7 +1188,7 @@ def _test_strided_dataset_2d_target():
     assert s["history"].shape[0] == 16
 
 
-def _test_strided_dataset_past_covariates():
+def test_strided_dataset_past_covariates():
     from src.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     past_cov = torch.randn(100, 2)
@@ -1173,7 +1198,7 @@ def _test_strided_dataset_past_covariates():
     assert s["past_covariates"].shape == (16, 2)
 
 
-def _test_strided_dataset_future_covariates():
+def test_strided_dataset_future_covariates():
     from src.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     future_cov = torch.randn(100, 3)
@@ -1182,7 +1207,7 @@ def _test_strided_dataset_future_covariates():
     assert "future_covariates" in s
 
 
-def _test_strided_dataset_too_short_raises():
+def test_strided_dataset_too_short_raises():
     from src.data.base_dataset import StridedTimeSeriesDataset
     try:
         StridedTimeSeriesDataset(torch.randn(10), context_len=8, pred_len=8, stride=1)
@@ -1191,7 +1216,7 @@ def _test_strided_dataset_too_short_raises():
         pass
 
 
-def _test_strided_dataset_invalid_params_raise():
+def test_strided_dataset_invalid_params_raise():
     from src.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     for bad_kwargs in [
@@ -1206,7 +1231,7 @@ def _test_strided_dataset_invalid_params_raise():
             pass
 
 
-def _test_feature_engineer_base():
+def test_feature_engineer_base():
     from src.data.base_dataset import FeatureEngineerBase
     eng = FeatureEngineerBase()
     x = torch.randn(10, 3)
@@ -1219,7 +1244,7 @@ def _test_feature_engineer_base():
 # SECTION 10: Metrics
 # =============================================================================
 
-def _test_crps_ensemble_perfect_forecast():
+def test_crps_ensemble_perfect_forecast():
     from src.research.metrics import crps_ensemble
     target = torch.tensor([1.0, 2.0, 3.0])
     sims = target.unsqueeze(-1).expand(-1, 200)
@@ -1230,7 +1255,7 @@ def _test_crps_ensemble_perfect_forecast():
     assert crps.max() < 0.01, "Perfect forecast should have near-zero CRPS"
 
 
-def _test_crps_ensemble_batch_horizon():
+def test_crps_ensemble_batch_horizon():
     from src.research.metrics import crps_ensemble
     batch, horizon, n_paths = 4, 12, 100
     sims = torch.randn(batch, horizon, n_paths)
@@ -1241,7 +1266,7 @@ def _test_crps_ensemble_batch_horizon():
     assert (crps >= -1e-6).all(), f"CRPS has unexpected negative values: {crps.min():.2e}"
 
 
-def _test_crps_ensemble_worse_is_higher():
+def test_crps_ensemble_worse_is_higher():
     from src.research.metrics import crps_ensemble
     target = torch.zeros(10)
     good_sims = torch.randn(10, 100) * 0.01
@@ -1251,7 +1276,34 @@ def _test_crps_ensemble_worse_is_higher():
     assert crps_good < crps_bad
 
 
-def _test_afcrps_ensemble():
+def test_crps_ensemble_analytical_gaussian():
+    """CRPS for a Gaussian ensemble approaches sigma/sqrt(pi) as n_paths -> infinity.
+
+    For X ~ N(0, sigma) and y sampled from the same distribution, the expected
+    CRPS equals sigma / sqrt(pi).  With 10 000 paths and 5 000 targets we should
+    be within 5% of the analytical value.
+    """
+    from src.research.metrics import crps_ensemble
+    import math
+
+    torch.manual_seed(0)
+    sigma = 2.0
+    n_paths = 10_000
+    batch = 5_000
+
+    sims = torch.randn(batch, n_paths) * sigma
+    target = torch.randn(batch) * sigma
+    crps = crps_ensemble(sims, target)
+
+    analytical = sigma / math.sqrt(math.pi)
+    empirical = crps.mean().item()
+
+    assert abs(empirical - analytical) / analytical < 0.05, (
+        f"CRPS empirical {empirical:.4f} too far from analytical {analytical:.4f}"
+    )
+
+
+def test_afcrps_ensemble():
     from src.research.metrics import afcrps_ensemble
     batch, n = 4, 50
     sims = torch.randn(batch, n)
@@ -1262,7 +1314,7 @@ def _test_afcrps_ensemble():
         assert (c >= 0).all()
 
 
-def _test_afcrps_alpha0_matches_crps():
+def test_afcrps_alpha0_matches_crps():
     from src.research.metrics import afcrps_ensemble, crps_ensemble
     sims = torch.randn(3, 50)
     target = torch.randn(3)
@@ -1271,7 +1323,7 @@ def _test_afcrps_alpha0_matches_crps():
     assert torch.allclose(c_af, c_std, atol=1e-5), "alpha=0 should match standard CRPS"
 
 
-def _test_log_likelihood_shapes():
+def test_log_likelihood_shapes():
     from src.research.metrics import log_likelihood
     sims = torch.randn(4, 100)
     target = torch.randn(4)
@@ -1279,7 +1331,7 @@ def _test_log_likelihood_shapes():
     assert ll.shape == (4,)
 
 
-def _test_log_likelihood_ordering():
+def test_log_likelihood_ordering():
     from src.research.metrics import log_likelihood
     target = torch.zeros(5)
     sims_good = torch.randn(5, 100) * 0.01
@@ -1289,14 +1341,14 @@ def _test_log_likelihood_ordering():
     assert ll_good > ll_bad, "Tight ensemble should have higher log-likelihood"
 
 
-def _test_get_interval_steps():
+def test_get_interval_steps():
     from src.research.metrics import get_interval_steps
     assert get_interval_steps(300, 60) == 5
     assert get_interval_steps(3600, 300) == 12
     assert get_interval_steps(86400, 3600) == 24
 
 
-def _test_calculate_price_changes_returns():
+def test_calculate_price_changes_returns():
     from src.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 102.0, 101.0, 104.0, 103.0, 106.0]])
     changes = calculate_price_changes_over_intervals(prices, interval_steps=2)
@@ -1304,14 +1356,14 @@ def _test_calculate_price_changes_returns():
     assert changes.shape[1] > 0
 
 
-def _test_calculate_price_changes_absolute():
+def test_calculate_price_changes_absolute():
     from src.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 102.0, 101.0, 104.0, 103.0, 106.0]])
     changes = calculate_price_changes_over_intervals(prices, interval_steps=2, absolute_price=True)
     assert changes.shape[0] == 1
 
 
-def _test_calculate_price_changes_edge_cases():
+def test_calculate_price_changes_edge_cases():
     from src.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 101.0]])
     # interval_steps >= T => empty result
@@ -1322,7 +1374,7 @@ def _test_calculate_price_changes_edge_cases():
     assert result2.shape[1] == 0
 
 
-def _test_label_observed_blocks():
+def test_label_observed_blocks():
     from src.research.metrics import label_observed_blocks
     arr = np.array([1.0, 2.0, np.nan, 4.0, 5.0])
     labels = label_observed_blocks(arr)
@@ -1332,7 +1384,7 @@ def _test_label_observed_blocks():
     assert labels[3] != labels[0]   # different block
 
 
-def _test_generate_adaptive_intervals():
+def test_generate_adaptive_intervals():
     from src.research.metrics import generate_adaptive_intervals
     intervals = generate_adaptive_intervals(horizon_steps=100, time_increment=60, min_intervals=3)
     assert isinstance(intervals, dict) and len(intervals) >= 1
@@ -1340,14 +1392,14 @@ def _test_generate_adaptive_intervals():
         assert isinstance(name, str) and secs > 0
 
 
-def _test_generate_adaptive_intervals_short_horizon():
+def test_generate_adaptive_intervals_short_horizon():
     from src.research.metrics import generate_adaptive_intervals
     # very short horizon
     intervals = generate_adaptive_intervals(horizon_steps=2, time_increment=60)
     assert isinstance(intervals, dict)
 
 
-def _test_filter_valid_intervals():
+def test_filter_valid_intervals():
     from src.research.metrics import filter_valid_intervals, SCORING_INTERVALS
     # With 10 steps at 60s each (600s total), only 5min (300s=5 steps) fits
     valid = filter_valid_intervals(SCORING_INTERVALS, horizon_steps=10, time_increment=60)
@@ -1358,7 +1410,7 @@ def _test_filter_valid_intervals():
         assert steps < 10
 
 
-def _test_crps_multi_interval_scorer_adaptive():
+def test_crps_multi_interval_scorer_adaptive():
     from src.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=60, adaptive=True)
     sims = torch.ones(50, 20) * 100.0 + torch.randn(50, 20) * 0.5
@@ -1368,7 +1420,7 @@ def _test_crps_multi_interval_scorer_adaptive():
     assert isinstance(detailed, list)
 
 
-def _test_crps_multi_interval_scorer_nonadaptive():
+def test_crps_multi_interval_scorer_nonadaptive():
     from src.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=300, adaptive=False)
     sims = torch.ones(50, 1000) * 100.0
@@ -1377,14 +1429,14 @@ def _test_crps_multi_interval_scorer_nonadaptive():
     assert isinstance(total, float)
 
 
-def _test_crps_scorer_caches_intervals():
+def test_crps_scorer_caches_intervals():
     from src.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=60, adaptive=True)
     scorer.get_intervals_for_horizon(50)
     assert 50 in scorer._interval_cache
 
 
-def _test_crps_scorer_invalid_time_increment():
+def test_crps_scorer_invalid_time_increment():
     from src.research.metrics import CRPSMultiIntervalScorer
     try:
         CRPSMultiIntervalScorer(time_increment=0)
@@ -1397,14 +1449,14 @@ def _test_crps_scorer_invalid_time_increment():
 # SECTION 11: Trainer
 # =============================================================================
 
-def _test_prepare_paths_for_crps():
+def test_prepare_paths_for_crps():
     from src.research.trainer import prepare_paths_for_crps
     paths = torch.randn(4, 100, 12)   # (batch, n_paths, horizon)
     ready = prepare_paths_for_crps(paths)
     assert ready.shape == (4, 12, 100)  # (batch, horizon, n_paths)
 
 
-def _test_data_to_model_adapter_shapes():
+def test_data_to_model_adapter_shapes():
     from src.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"))
     batch = {"inputs": torch.randn(4, 3, 32), "target": torch.randn(4, 1, 8)}
@@ -1414,7 +1466,7 @@ def _test_data_to_model_adapter_shapes():
     assert result["target_factors"].shape == (4, 8)
 
 
-def _test_data_to_model_adapter_zero_logreturns():
+def test_data_to_model_adapter_zero_logreturns():
     from src.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"), target_is_log_return=True)
     batch = {"inputs": torch.randn(2, 3, 16), "target": torch.zeros(2, 1, 4)}
@@ -1423,7 +1475,7 @@ def _test_data_to_model_adapter_zero_logreturns():
     assert torch.allclose(result["target_factors"], torch.ones(2, 4), atol=1e-5)
 
 
-def _test_data_to_model_adapter_bad_input_raises():
+def test_data_to_model_adapter_bad_input_raises():
     from src.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"))
     bad_batch = {"inputs": torch.randn(4, 32), "target": torch.randn(4, 1, 8)}  # 2D input
@@ -1434,7 +1486,7 @@ def _test_data_to_model_adapter_bad_input_raises():
         pass
 
 
-def _test_trainer_train_step():
+def test_trainer_train_step():
     from src.research.trainer import Trainer
     from src.models.factory import SynthModel, HybridBackbone
     from src.models.registry import LSTMBlock
@@ -1451,9 +1503,12 @@ def _test_trainer_train_step():
         assert key in metrics, f"missing key: {key}"
     assert isinstance(metrics["loss"], float)
     assert metrics["loss"] >= 0
+    # Verify the optimizer actually updated at least one parameter.
+    changed = [n for n, p in model.named_parameters() if p.grad is not None]
+    assert len(changed) > 0, "train_step must populate gradients on model parameters"
 
 
-def _test_trainer_train_step_afcrps_vs_crps():
+def test_trainer_train_step_afcrps_vs_crps():
     from src.research.trainer import Trainer
     from src.models.factory import SynthModel, HybridBackbone
     from src.models.registry import TransformerBlock
@@ -1474,7 +1529,7 @@ def _test_trainer_train_step_afcrps_vs_crps():
     assert isinstance(m2["loss"], float)
 
 
-def _test_trainer_validate():
+def test_trainer_validate():
     from src.research.trainer import Trainer
     from src.models.factory import SynthModel, HybridBackbone
     from src.models.registry import LSTMBlock
@@ -1491,14 +1546,20 @@ def _test_trainer_validate():
 
     metrics = trainer.validate(fake_loader())
     assert "val_crps" in metrics
-    assert isinstance(metrics["val_crps"], float) and metrics["val_crps"] >= 0
+    val_crps = metrics["val_crps"]
+    assert isinstance(val_crps, float)
+    assert val_crps >= 0, "CRPS must be non-negative"
+    import math
+    assert math.isfinite(val_crps), "val_crps must be finite"
+    # A sane model on random data with n_paths=10 should not produce CRPS above 1e6.
+    assert val_crps < 1e6, f"val_crps is suspiciously large: {val_crps}"
 
 
 # =============================================================================
 # SECTION 12: Factory Functions
 # =============================================================================
 
-def _test_build_model_from_dict():
+def test_build_model_from_dict():
     from src.models.factory import build_model, SynthModel
     cfg = {
         "backbone": {
@@ -1512,7 +1573,7 @@ def _test_build_model_from_dict():
     assert isinstance(model, SynthModel)
 
 
-def _test_build_model_latent_mismatch_raises():
+def test_build_model_latent_mismatch_raises():
     from src.models.factory import build_model
     cfg = {
         "backbone": {
@@ -1532,7 +1593,7 @@ def _test_build_model_latent_mismatch_raises():
         pass
 
 
-def _test_smoke_test_model():
+def test_smoketest_model():
     from src.models.factory import _smoke_test_model, SynthModel, HybridBackbone
     from src.models.registry import LSTMBlock
     from src.models.heads import GBMHead
@@ -1542,7 +1603,7 @@ def _test_smoke_test_model():
     _smoke_test_model(model, input_size=5)  # should not raise
 
 
-def _test_head_registry_all_8_heads():
+def test_head_registry_all_8_heads():
     from src.models.factory import HEAD_REGISTRY
     expected = [
         "gbm", "sde", "neural_sde", "horizon", "simple_horizon",
@@ -1552,7 +1613,7 @@ def _test_head_registry_all_8_heads():
         assert h in HEAD_REGISTRY, f"HEAD_REGISTRY missing '{h}'"
 
 
-def _test_create_model_idempotent():
+def test_create_model_idempotent():
     from src.models.factory import create_model, SynthModel
     from src.models.heads import GBMHead
     model = SynthModel(_backbone(), GBMHead(latent_size=32))
@@ -1567,156 +1628,157 @@ def _test_create_model_idempotent():
 
 if __name__ == "__main__":
     section("SECTION 1: Registry")
-    run("registry_instantiation",          _test_registry_instantiation)
-    run("registry_block_register_get",     _test_registry_block_register_and_get)
-    run("registry_component_register",     _test_registry_component_register)
-    run("registry_hybrid_register",        _test_registry_hybrid_register)
-    run("registry_list_blocks",            _test_registry_list_blocks)
-    run("registry_summary",                _test_registry_summary)
-    run("registry_recipe_hash",            _test_registry_recipe_hash)
-    run("registry_attribute_access",       _test_registry_attribute_access)
-    run("registry_missing_raises",         _test_registry_missing_raises)
-    run("registry_duplicate_raises",       _test_registry_duplicate_raises)
-    run("discover_components",             _test_discover_components)
+    run("registry_instantiation",          test_registry_instantiation)
+    run("registry_block_register_get",     test_registry_block_register_and_get)
+    run("registry_component_register",     test_registry_component_register)
+    run("registry_hybrid_register",        test_registry_hybrid_register)
+    run("registry_list_blocks",            test_registry_list_blocks)
+    run("registry_summary",                test_registry_summary)
+    run("registry_recipe_hash",            test_registry_recipe_hash)
+    run("registry_attribute_access",       test_registry_attribute_access)
+    run("registry_missing_raises",         test_registry_missing_raises)
+    run("registry_duplicate_raises",       test_registry_duplicate_raises)
+    run("discover_components",             test_discover_components)
 
     section("SECTION 2: Built-in Blocks")
-    run("transformer_block",               _test_transformer_block)
-    run("lstm_block",                      _test_lstm_block)
-    run("sde_evolution_block",             _test_sde_evolution_block)
-    run("custom_attention",                _test_custom_attention)
-    run("gated_mlp",                       _test_gated_mlp)
-    run("patch_merging",                   _test_patch_merging)
+    run("transformer_block",               test_transformer_block)
+    run("lstm_block",                      test_lstm_block)
+    run("sde_evolution_block",             test_sde_evolution_block)
+    run("custom_attention",                test_custom_attention)
+    run("gated_mlp",                       test_gated_mlp)
+    run("patch_merging",                   test_patch_merging)
 
     section("SECTION 3: Advanced Blocks")
-    run("rnn_block",                       _test_rnn_block)
-    run("gru_block",                       _test_gru_block)
-    run("resconv_block",                   _test_resconv_block)
-    run("bitcn_block",                     _test_bitcn_block)
-    run("patch_embedding_changes_seq",     _test_patch_embedding_changes_seq)
-    run("unet1d_block",                    _test_unet1d_block)
-    run("transformer_encoder_adapter",     _test_transformer_encoder_adapter)
-    run("transformer_decoder_adapter",     _test_transformer_decoder_adapter)
-    run("fourier_block",                   _test_fourier_block)
-    run("last_step_adapter_modes",         _test_last_step_adapter_modes)
-    run("revin_norm_denorm",               _test_revin_norm_denorm)
-    run("revin_invalid_mode",              _test_revin_invalid_mode)
-    run("flexible_patch_embed",            _test_flexible_patch_embed)
-    run("flexible_patch_embed_channel_independence", _test_flexible_patch_embed_channel_independence)
-    run("channel_rejoin_mean",             _test_channel_rejoin_mean)
-    run("dlinear_block",                   _test_dlinear_block)
-    run("layernorm_block",                 _test_layernorm_block)
-    run("timesnet_block",                  _test_timesnet_block)
+    run("rnn_block",                       test_rnn_block)
+    run("gru_block",                       test_gru_block)
+    run("resconv_block",                   test_resconv_block)
+    run("bitcn_block",                     test_bitcn_block)
+    run("patch_embedding_changes_seq",     test_patch_embedding_changes_seq)
+    run("unet1d_block",                    test_unet1d_block)
+    run("transformer_encoder_adapter",     test_transformer_encoder_adapter)
+    run("transformer_decoder_adapter",     test_transformer_decoder_adapter)
+    run("fourier_block",                   test_fourier_block)
+    run("last_step_adapter_modes",         test_last_step_adapter_modes)
+    run("revin_norm_denorm",               test_revin_norm_denorm)
+    run("revin_invalid_mode",              test_revin_invalid_mode)
+    run("flexible_patch_embed",            test_flexible_patch_embed)
+    run("flexible_patch_embed_channel_independence", test_flexible_patch_embed_channel_independence)
+    run("channel_rejoin_mean",             test_channel_rejoin_mean)
+    run("dlinear_block",                   test_dlinear_block)
+    run("layernorm_block",                 test_layernorm_block)
+    run("timesnet_block",                  test_timesnet_block)
 
     section("SECTION 4: Heads")
-    run("gbm_head_shapes_positivity",      _test_gbm_head_shapes_and_positivity)
-    run("sde_head",                        _test_sde_head)
-    run("horizon_head",                    _test_horizon_head)
-    run("horizon_head_kv_compression",     _test_horizon_head_kv_compression)
-    run("horizon_head_clips_to_max",       _test_horizon_head_clips_to_max)
-    run("simple_horizon_head_all_pools",   _test_simple_horizon_head_all_pools)
-    run("simple_horizon_head_invalid_pool",_test_simple_horizon_head_invalid_pool)
-    run("mixture_density_head",            _test_mixture_density_head)
-    run("vol_term_structure_head",         _test_vol_term_structure_head)
-    run("neural_bridge_no_price",          _test_neural_bridge_head_no_price)
-    run("neural_bridge_with_price",        _test_neural_bridge_head_with_price)
-    run("neural_sde_head",                 _test_neural_sde_head)
+    run("gbm_head_shapes_positivity",      test_gbm_head_shapes_and_positivity)
+    run("sde_head",                        test_sde_head)
+    run("horizon_head",                    test_horizon_head)
+    run("horizon_head_kv_compression",     test_horizon_head_kv_compression)
+    run("horizon_head_clips_to_max",       test_horizon_head_clips_to_max)
+    run("simple_horizon_head_all_pools",   test_simple_horizon_head_all_pools)
+    run("simple_horizon_head_invalid_pool",test_simple_horizon_head_invalid_pool)
+    run("mixture_density_head",            test_mixture_density_head)
+    run("vol_term_structure_head",         test_vol_term_structure_head)
+    run("neural_bridge_no_price",          test_neural_bridge_head_no_price)
+    run("neural_bridge_with_price",        test_neural_bridge_head_with_price)
+    run("neural_sde_head",                 test_neural_sde_head)
 
     section("SECTION 5: HybridBackbone & ParallelFusion")
-    run("backbone_last_step",              _test_hybrid_backbone_last_step)
-    run("backbone_forward_sequence",       _test_hybrid_backbone_forward_sequence)
-    run("backbone_multiple_blocks",        _test_hybrid_backbone_multiple_blocks)
-    run("backbone_insert_layernorm",       _test_hybrid_backbone_insert_layernorm)
-    run("backbone_empty_raises",           _test_hybrid_backbone_empty_raises)
-    run("backbone_output_dim",             _test_hybrid_backbone_output_dim)
-    run("parallel_fusion_gating",          _test_parallel_fusion_gating)
-    run("parallel_fusion_concat",          _test_parallel_fusion_concat)
-    run("parallel_fusion_too_few_raises",  _test_parallel_fusion_too_few_paths_raises)
-    run("parallel_fusion_bad_strategy",    _test_parallel_fusion_bad_strategy_raises)
+    run("backbone_last_step",              test_hybrid_backbone_last_step)
+    run("backbone_forward_sequence",       test_hybrid_backbone_forward_sequence)
+    run("backbone_multiple_blocks",        test_hybrid_backbone_multiple_blocks)
+    run("backbone_insert_layernorm",       test_hybrid_backbone_insert_layernorm)
+    run("backbone_empty_raises",           test_hybrid_backbone_empty_raises)
+    run("backbone_output_dim",             test_hybrid_backbone_output_dim)
+    run("parallel_fusion_gating",          test_parallel_fusion_gating)
+    run("parallel_fusion_concat",          test_parallel_fusion_concat)
+    run("parallel_fusion_too_few_raises",  test_parallel_fusion_too_few_paths_raises)
+    run("parallel_fusion_bad_strategy",    test_parallel_fusion_bad_strategy_raises)
 
     section("SECTION 6: SynthModel — All Head Types")
-    run("synth_gbm",                       _test_synth_gbm)
-    run("synth_sde",                       _test_synth_sde)
-    run("synth_horizon",                   _test_synth_horizon)
-    run("synth_simple_horizon",            _test_synth_simple_horizon)
-    run("synth_mixture_density",           _test_synth_mixture_density)
-    run("synth_vol_term_structure",        _test_synth_vol_term_structure)
-    run("synth_neural_bridge",             _test_synth_neural_bridge)
-    run("synth_neural_sde",                _test_synth_neural_sde)
-    run("synth_shape_contract_all_heads",  _test_synth_shape_contract_all_heads)
+    run("synth_gbm",                       test_synth_gbm)
+    run("synth_sde",                       test_synth_sde)
+    run("synth_horizon",                   test_synth_horizon)
+    run("synth_simple_horizon",            test_synth_simple_horizon)
+    run("synth_mixture_density",           test_synth_mixture_density)
+    run("synth_vol_term_structure",        test_synth_vol_term_structure)
+    run("synth_neural_bridge",             test_synth_neural_bridge)
+    run("synth_neural_sde",                test_synth_neural_sde)
+    run("synth_shape_contract_all_heads",  test_synth_shape_contract_all_heads)
 
     section("SECTION 7: Path Simulators")
-    run("simulate_gbm_paths",              _test_simulate_gbm_paths)
-    run("simulate_gbm_positivity_extremes",_test_simulate_gbm_positivity_extremes)
-    run("simulate_gbm_dt_param",           _test_simulate_gbm_dt)
-    run("simulate_horizon_paths",          _test_simulate_horizon_paths)
-    run("simulate_bridge_paths",           _test_simulate_bridge_paths)
-    run("simulate_mixture_paths",          _test_simulate_mixture_paths)
+    run("simulate_gbm_paths",              test_simulate_gbm_paths)
+    run("simulate_gbm_positivity_extremes",test_simulate_gbm_positivity_extremes)
+    run("simulate_gbm_dt_param",           test_simulate_gbm_dt)
+    run("simulate_horizon_paths",          test_simulate_horizon_paths)
+    run("simulate_bridge_paths",           test_simulate_bridge_paths)
+    run("simulate_mixture_paths",          test_simulate_mixture_paths)
 
     section("SECTION 8: Data Pipeline")
-    run("mock_data_source",                _test_mock_data_source)
-    run("mock_data_source_reproducible",   _test_mock_data_source_reproducible)
-    run("zscore_feature_dim",              _test_zscore_engineer_feature_dim)
-    run("zscore_prepare_cache",            _test_zscore_engineer_prepare_cache)
-    run("zscore_make_input",               _test_zscore_engineer_make_input)
-    run("zscore_make_target",              _test_zscore_engineer_make_target)
-    run("zscore_get_volatility",           _test_zscore_engineer_get_volatility)
-    run("zscore_clean_prices",             _test_zscore_engineer_clean_prices)
-    run("wavelet_feature_dim",             _test_wavelet_engineer_feature_dim)
-    run("wavelet_make_input",              _test_wavelet_engineer_make_input)
-    run("asset_data_dataclass",            _test_asset_data_dataclass)
-    run("market_dataset",                  _test_market_dataset)
-    run("market_dataset_vol_buckets",      _test_market_dataset_vol_buckets)
-    run("market_data_loader_construction", _test_market_data_loader_construction)
-    run("market_data_loader_price_series", _test_market_data_loader_get_price_series)
-    run("market_data_loader_static_holdout", _test_market_data_loader_static_holdout)
-    run("market_data_loader_multi_assets", _test_market_data_loader_multiple_assets)
-    run("market_data_loader_wavelet",      _test_market_data_loader_wavelet)
+    run("mock_data_source",                test_mock_data_source)
+    run("mock_data_source_reproducible",   test_mock_data_source_reproducible)
+    run("zscore_feature_dim",              test_zscore_engineer_feature_dim)
+    run("zscore_prepare_cache",            test_zscore_engineer_prepare_cache)
+    run("zscore_make_input",               test_zscore_engineer_make_input)
+    run("zscore_make_target",              test_zscore_engineer_make_target)
+    run("zscore_get_volatility",           test_zscore_engineer_get_volatility)
+    run("zscore_clean_prices",             test_zscore_engineer_clean_prices)
+    run("wavelet_feature_dim",             test_wavelet_engineer_feature_dim)
+    run("wavelet_make_input",              test_wavelet_engineer_make_input)
+    run("asset_data_dataclass",            test_asset_data_dataclass)
+    run("market_dataset",                  test_market_dataset)
+    run("market_dataset_vol_buckets",      test_market_dataset_vol_buckets)
+    run("market_data_loader_construction", test_market_data_loader_construction)
+    run("market_data_loader_price_series", test_market_data_loader_get_price_series)
+    run("market_data_loader_static_holdout", test_market_data_loader_static_holdout)
+    run("market_data_loader_multi_assets", test_market_data_loader_multiple_assets)
+    run("market_data_loader_wavelet",      test_market_data_loader_wavelet)
 
     section("SECTION 9: StridedTimeSeriesDataset + FeatureEngineerBase")
-    run("strided_dataset_basic",           _test_strided_dataset_basic)
-    run("strided_dataset_2d_target",       _test_strided_dataset_2d_target)
-    run("strided_dataset_past_covariates", _test_strided_dataset_past_covariates)
-    run("strided_dataset_future_covariates", _test_strided_dataset_future_covariates)
-    run("strided_dataset_too_short_raises",_test_strided_dataset_too_short_raises)
-    run("strided_dataset_invalid_params",  _test_strided_dataset_invalid_params_raise)
-    run("feature_engineer_base",           _test_feature_engineer_base)
+    run("strided_dataset_basic",           test_strided_dataset_basic)
+    run("strided_dataset_2d_target",       test_strided_dataset_2d_target)
+    run("strided_dataset_past_covariates", test_strided_dataset_past_covariates)
+    run("strided_dataset_future_covariates", test_strided_dataset_future_covariates)
+    run("strided_dataset_too_short_raises",test_strided_dataset_too_short_raises)
+    run("strided_dataset_invalid_params",  test_strided_dataset_invalid_params_raise)
+    run("feature_engineer_base",           test_feature_engineer_base)
 
     section("SECTION 10: Metrics")
-    run("crps_perfect_forecast",           _test_crps_ensemble_perfect_forecast)
-    run("crps_batch_horizon_shape",        _test_crps_ensemble_batch_horizon)
-    run("crps_worse_is_higher",            _test_crps_ensemble_worse_is_higher)
-    run("afcrps_all_alphas",               _test_afcrps_ensemble)
-    run("afcrps_alpha0_matches_crps",      _test_afcrps_alpha0_matches_crps)
-    run("log_likelihood_shape",            _test_log_likelihood_shapes)
-    run("log_likelihood_ordering",         _test_log_likelihood_ordering)
-    run("get_interval_steps",              _test_get_interval_steps)
-    run("price_changes_returns",           _test_calculate_price_changes_returns)
-    run("price_changes_absolute",          _test_calculate_price_changes_absolute)
-    run("price_changes_edge_cases",        _test_calculate_price_changes_edge_cases)
-    run("label_observed_blocks",           _test_label_observed_blocks)
-    run("generate_adaptive_intervals",     _test_generate_adaptive_intervals)
-    run("adaptive_intervals_short_horizon",_test_generate_adaptive_intervals_short_horizon)
-    run("filter_valid_intervals",          _test_filter_valid_intervals)
-    run("crps_scorer_adaptive",            _test_crps_multi_interval_scorer_adaptive)
-    run("crps_scorer_nonadaptive",         _test_crps_multi_interval_scorer_nonadaptive)
-    run("crps_scorer_caches",              _test_crps_scorer_caches_intervals)
-    run("crps_scorer_invalid_increment",   _test_crps_scorer_invalid_time_increment)
+    run("crps_perfect_forecast",           test_crps_ensemble_perfect_forecast)
+    run("crps_batch_horizon_shape",        test_crps_ensemble_batch_horizon)
+    run("crps_worse_is_higher",            test_crps_ensemble_worse_is_higher)
+    run("crps_analytical_gaussian",        test_crps_ensemble_analytical_gaussian)
+    run("afcrps_all_alphas",               test_afcrps_ensemble)
+    run("afcrps_alpha0_matches_crps",      test_afcrps_alpha0_matches_crps)
+    run("log_likelihood_shape",            test_log_likelihood_shapes)
+    run("log_likelihood_ordering",         test_log_likelihood_ordering)
+    run("get_interval_steps",              test_get_interval_steps)
+    run("price_changes_returns",           test_calculate_price_changes_returns)
+    run("price_changes_absolute",          test_calculate_price_changes_absolute)
+    run("price_changes_edge_cases",        test_calculate_price_changes_edge_cases)
+    run("label_observed_blocks",           test_label_observed_blocks)
+    run("generate_adaptive_intervals",     test_generate_adaptive_intervals)
+    run("adaptive_intervals_short_horizon",test_generate_adaptive_intervals_short_horizon)
+    run("filter_valid_intervals",          test_filter_valid_intervals)
+    run("crps_scorer_adaptive",            test_crps_multi_interval_scorer_adaptive)
+    run("crps_scorer_nonadaptive",         test_crps_multi_interval_scorer_nonadaptive)
+    run("crps_scorer_caches",              test_crps_scorer_caches_intervals)
+    run("crps_scorer_invalid_increment",   test_crps_scorer_invalid_time_increment)
 
     section("SECTION 11: Trainer")
-    run("prepare_paths_for_crps",          _test_prepare_paths_for_crps)
-    run("adapter_shapes",                  _test_data_to_model_adapter_shapes)
-    run("adapter_zero_logreturns",         _test_data_to_model_adapter_zero_logreturns)
-    run("adapter_bad_input_raises",        _test_data_to_model_adapter_bad_input_raises)
-    run("trainer_train_step",              _test_trainer_train_step)
-    run("trainer_afcrps_vs_crps",          _test_trainer_train_step_afcrps_vs_crps)
-    run("trainer_validate",                _test_trainer_validate)
+    run("prepare_paths_for_crps",          test_prepare_paths_for_crps)
+    run("adapter_shapes",                  test_data_to_model_adapter_shapes)
+    run("adapter_zero_logreturns",         test_data_to_model_adapter_zero_logreturns)
+    run("adapter_bad_input_raises",        test_data_to_model_adapter_bad_input_raises)
+    run("trainer_train_step",              test_trainer_train_step)
+    run("trainer_afcrps_vs_crps",          test_trainer_train_step_afcrps_vs_crps)
+    run("trainer_validate",                test_trainer_validate)
 
     section("SECTION 12: Factory Functions")
-    run("build_model_from_dict",           _test_build_model_from_dict)
-    run("build_model_latent_mismatch",     _test_build_model_latent_mismatch_raises)
-    run("smoke_test_model",                _test_smoke_test_model)
-    run("head_registry_all_8_heads",       _test_head_registry_all_8_heads)
-    run("create_model_idempotent",         _test_create_model_idempotent)
+    run("build_model_from_dict",           test_build_model_from_dict)
+    run("build_model_latent_mismatch",     test_build_model_latent_mismatch_raises)
+    run("smoketest_model",                test_smoketest_model)
+    run("head_registry_all_8_heads",       test_head_registry_all_8_heads)
+    run("create_model_idempotent",         test_create_model_idempotent)
 
     ok = summary()
     sys.exit(0 if ok else 1)

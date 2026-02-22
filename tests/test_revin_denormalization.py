@@ -64,14 +64,17 @@ def test_synthmodel_denormalization_affects_outputs():
     x = torch.randn(batch_size, seq_len, input_size) * 10.0  # Scale input
     initial_price = torch.ones(batch_size)
 
-    # Run with denormalization
+    # Run with denormalization — fix the RNG so stochastic GBM paths are identical
+    # to the run without denorm and differences are solely due to scaling.
     with torch.no_grad():
+        torch.manual_seed(7)
         paths_denorm, mu_denorm, sigma_denorm = model(
             x, initial_price, horizon, n_paths, apply_revin_denorm=True
         )
 
     # Run without denormalization
     with torch.no_grad():
+        torch.manual_seed(7)
         paths_no_denorm, mu_no_denorm, sigma_no_denorm = model(
             x, initial_price, horizon, n_paths, apply_revin_denorm=False
         )

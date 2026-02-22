@@ -8,10 +8,26 @@ import wandb
 
 
 def _fan_chart_table(paths: torch.Tensor, actual: torch.Tensor, horizon: int) -> wandb.Table:
-    """Create a fan chart table with percentile bands."""
-    # paths: (batch, n_paths, horizon)
+    """Create a fan chart table with percentile bands.
+
+    When inputs carry a batch dimension the first element is used so the chart
+    represents a single concrete example rather than a batch aggregate.
+
+    Parameters
+    ----------
+    paths : (batch, n_paths, horizon) or (n_paths, horizon)
+    actual : (batch, horizon) or (horizon,)
+    horizon : number of forecast steps
+    """
+    # Collapse optional batch dimension — fan chart is per-sequence.
+    if paths.ndim == 3:
+        paths = paths[0]   # (n_paths, horizon)
+    if actual.ndim == 2:
+        actual = actual[0]  # (horizon,)
+
     percentiles = torch.tensor([5.0, 50.0, 95.0], device=paths.device)
-    percentile_values = torch.quantile(paths, percentiles / 100.0, dim=1)
+    # Quantile over n_paths (dim=0) → (3, horizon)
+    percentile_values = torch.quantile(paths, percentiles / 100.0, dim=0)
     data = []
     for t in range(horizon):
         row = {
