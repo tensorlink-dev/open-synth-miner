@@ -24,11 +24,10 @@ jobs:
 
       - name: Run tests with coverage
         run: |
-          pytest tests/ --cov=src --cov-report=xml:coverage.xml --cov-report=term-missing
+          pytest tests/
 
       - name: Generate coverage badge
         run: |
-          pip install coverage-badge
           coverage-badge -o coverage.svg -f
 
       - name: Commit badge
