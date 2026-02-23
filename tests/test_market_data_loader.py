@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.market_data_loader import MarketDataLoader, MockDataSource, ZScoreEngineer
+from osa.data.market_data_loader import MarketDataLoader, MockDataSource, ZScoreEngineer
 
 
 def test_static_holdout_accepts_fractional_cutoff():

@@ -42,7 +42,7 @@ from sklearn.cluster import KMeans
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, Dataset, Sampler
 
-from src.data.market_data_loader import (
+from osa.data.market_data_loader import (
     AssetData,
     DataSource,
 )

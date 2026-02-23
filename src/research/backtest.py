@@ -7,10 +7,10 @@ import torch
 import wandb
 from torch.utils.data import DataLoader
 
-from src.data.base_dataset import StridedTimeSeriesDataset
-from src.models.factory import get_model
-from src.research.metrics import CRPSMultiIntervalScorer, crps_ensemble
-from src.tracking.wandb_logger import log_backtest_results
+from osa.data.base_dataset import StridedTimeSeriesDataset
+from osa.models.factory import get_model
+from osa.research.metrics import CRPSMultiIntervalScorer, crps_ensemble
+from osa.tracking.wandb_logger import log_backtest_results
 
 
 class ChallengerVsChampion:

@@ -4,8 +4,8 @@ This allows ``import open_synth_miner`` when the project is installed
 or when the repository root is on the Python path.
 """
 
-import src as _src
+import osa as _osa
 
-from src import *  # noqa: F401,F403
+from osa import *  # noqa: F401,F403
 
-__all__ = _src.__all__  # type: ignore[attr-defined]
+__all__ = _osa.__all__  # type: ignore[attr-defined]

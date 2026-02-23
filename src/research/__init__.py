@@ -1,9 +1,9 @@
 """Research helpers for training and backtesting synthetic path models."""
 
-from src.research.ablation import AblationExperiment
-from src.research.backtest_runner import BacktestRunner
-from src.research.experiment_mgr import load_config, run_experiment
-from src.research.metrics import CRPSMultiIntervalScorer, SCORING_INTERVALS
+from osa.research.ablation import AblationExperiment
+from osa.research.backtest_runner import BacktestRunner
+from osa.research.experiment_mgr import load_config, run_experiment
+from osa.research.metrics import CRPSMultiIntervalScorer, SCORING_INTERVALS
 
 __all__ = [
     "AblationExperiment",

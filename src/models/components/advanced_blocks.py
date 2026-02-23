@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.models.registry import registry, TransformerBlock  # noqa: F401
+from osa.models.registry import registry, TransformerBlock  # noqa: F401
 
 logger = logging.getLogger(__name__)
 

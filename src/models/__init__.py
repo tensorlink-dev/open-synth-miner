@@ -5,8 +5,8 @@ are resolved lazily from the registry via ``__getattr__`` so thousands of
 registrations can coexist without upfront import costs.
 """
 
-from src.models.backbones import BackboneBase
-from src.models.factory import (
+from osa.models.backbones import BackboneBase
+from osa.models.factory import (
     HybridBackbone,
     ParallelFusion,
     SynthModel,
@@ -15,8 +15,8 @@ from src.models.factory import (
     get_model,
     simulate_gbm_paths,
 )
-from src.models.heads import GBMHead, HeadBase, NeuralSDEHead, SDEHead
-from src.models.registry import discover_components, registry
+from osa.models.heads import GBMHead, HeadBase, NeuralSDEHead, SDEHead
+from osa.models.registry import discover_components, registry
 
 __all__ = [
     "BackboneBase",
@@ -40,7 +40,7 @@ def __getattr__(name: str):
     """Lazily expose registered blocks/components/hybrids by attribute.
 
     This avoids importing every block up front while still allowing convenient
-    access, e.g., ``from src import models; models.CustomBlock`` after the
+    access, e.g., ``from osa import models; models.CustomBlock`` after the
     relevant modules have been discovered/registered.
     """
 

@@ -3,7 +3,7 @@ import dataclasses
 
 import pytest
 
-from src.models.registry import BlockInfo, Registry, discover_components, registry
+from osa.models.registry import BlockInfo, Registry, discover_components, registry
 
 
 def test_core_blocks_have_info():

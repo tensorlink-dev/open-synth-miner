@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 import torch
 
-from src.research.metrics import (
+from osa.research.metrics import (
     afcrps_ensemble,
     calculate_crps_for_paths,
     calculate_price_changes_over_intervals,

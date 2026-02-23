@@ -1,20 +1,20 @@
 model:
-  _target_: src.models.factory.SynthModel
+  _target_: osa.models.factory.SynthModel
   backbone:
-    _target_: src.models.factory.HybridBackbone
+    _target_: osa.models.factory.HybridBackbone
     input_size: 4
     d_model: 32
     insert_layernorm: true
     blocks:
-      - _target_: src.models.registry.TransformerBlock
+      - _target_: osa.models.registry.TransformerBlock
         d_model: 32
         nhead: 4
-      - _target_: src.models.registry.LSTMBlock
+      - _target_: osa.models.registry.LSTMBlock
         d_model: 32
         num_layers: 1
-      - _target_: src.models.registry.TransformerBlock
+      - _target_: osa.models.registry.TransformerBlock
         d_model: 32
         nhead: 2
   head:
-    _target_: src.models.heads.GBMHead
+    _target_: osa.models.heads.GBMHead
     latent_size: 32

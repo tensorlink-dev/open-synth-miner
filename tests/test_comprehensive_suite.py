@@ -23,7 +23,7 @@ sys.path.insert(0, ROOT)
 
 # ---------------------------------------------------------------------------
 # Hydra / omegaconf compatibility shim
-# Must be installed into sys.modules BEFORE any 'from src.*' imports so that
+# Must be installed into sys.modules BEFORE any 'from osa.*' imports so that
 # src/models/factory.py can be imported even if hydra-core is not installed
 # or omegaconf has an antlr4 version conflict.
 # ---------------------------------------------------------------------------
@@ -184,8 +184,8 @@ def _t(batch: int = 2, seq: int = 16, d: int = 32) -> torch.Tensor:
 
 
 def _backbone(input_size: int = 3, d_model: int = 32):
-    from src.models.factory import HybridBackbone
-    from src.models.registry import TransformerBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import TransformerBlock
     return HybridBackbone(
         input_size=input_size,
         d_model=d_model,
@@ -199,14 +199,14 @@ def _backbone(input_size: int = 3, d_model: int = 32):
 # =============================================================================
 
 def test_registry_instantiation():
-    from src.models.registry import Registry, registry
+    from osa.models.registry import Registry, registry
     r = Registry()
     assert hasattr(r, "components") and hasattr(r, "blocks") and hasattr(r, "hybrids")
     assert isinstance(registry, Registry)
 
 
 def test_registry_block_register_and_get():
-    from src.models.registry import Registry
+    from osa.models.registry import Registry
     r = Registry()
 
     @r.register_block("myblock_s1", preserves_seq_len=True, min_seq_len=2, description="Test")
@@ -223,7 +223,7 @@ def test_registry_block_register_and_get():
 
 
 def test_registry_component_register():
-    from src.models.registry import Registry
+    from osa.models.registry import Registry
     r = Registry()
 
     @r.register_component("mycomp_s1", description="Comp")
@@ -235,7 +235,7 @@ def test_registry_component_register():
 
 
 def test_registry_hybrid_register():
-    from src.models.registry import Registry
+    from osa.models.registry import Registry
     r = Registry()
 
     @r.register_hybrid("myhybrid_s1", description="Hybrid")
@@ -247,7 +247,7 @@ def test_registry_hybrid_register():
 
 
 def test_registry_list_blocks():
-    from src.models.registry import registry
+    from osa.models.registry import registry
     blocks = registry.list_blocks(kind="block")
     assert len(blocks) > 0
     assert all(b.kind == "block" for b in blocks)
@@ -256,7 +256,7 @@ def test_registry_list_blocks():
 
 
 def test_registry_summary():
-    from src.models.registry import registry
+    from osa.models.registry import registry
     s = registry.summary()
     assert isinstance(s, str) and len(s) > 0
     s_blocks = registry.summary(kind="block")
@@ -264,7 +264,7 @@ def test_registry_summary():
 
 
 def test_registry_recipe_hash():
-    from src.models.registry import Registry
+    from osa.models.registry import Registry
     h1 = Registry.recipe_hash({"a": 1, "b": [2, 3]})
     h2 = Registry.recipe_hash({"b": [2, 3], "a": 1})
     assert h1 == h2
@@ -274,13 +274,13 @@ def test_registry_recipe_hash():
 
 
 def test_registry_attribute_access():
-    from src.models.registry import registry, TransformerBlock, LSTMBlock
+    from osa.models.registry import registry, TransformerBlock, LSTMBlock
     assert registry.TransformerBlock is TransformerBlock
     assert registry.LSTMBlock is LSTMBlock
 
 
 def test_registry_missing_raises():
-    from src.models.registry import registry
+    from osa.models.registry import registry
     try:
         registry.get_block("no_such_block_xyzabc")
         raise AssertionError("Should raise KeyError")
@@ -294,7 +294,7 @@ def test_registry_missing_raises():
 
 
 def test_registry_duplicate_raises():
-    from src.models.registry import Registry
+    from osa.models.registry import Registry
     r = Registry()
 
     @r.register_block("dupblock_s1")
@@ -311,7 +311,7 @@ def test_registry_duplicate_raises():
 
 
 def test_discover_components():
-    from src.models.registry import discover_components, registry
+    from osa.models.registry import discover_components, registry
     # conftest's session-scoped autouse fixture already ran discover_components, so the
     # registry is fully populated before this test starts.  Calling discover_components
     # a second time is idempotent — it must not raise and must leave all advanced blocks
@@ -334,7 +334,7 @@ def test_discover_components():
 # =============================================================================
 
 def test_transformer_block():
-    from src.models.registry import TransformerBlock
+    from osa.models.registry import TransformerBlock
     b = TransformerBlock(d_model=32, nhead=4, dropout=0.0)
     b.eval()
     x = _t()
@@ -345,7 +345,7 @@ def test_transformer_block():
 
 
 def test_lstm_block():
-    from src.models.registry import LSTMBlock
+    from osa.models.registry import LSTMBlock
     b = LSTMBlock(d_model=32, num_layers=2)
     b.eval()
     x = _t()
@@ -355,7 +355,7 @@ def test_lstm_block():
 
 
 def test_sde_evolution_block():
-    from src.models.registry import SDEEvolutionBlock
+    from osa.models.registry import SDEEvolutionBlock
     b = SDEEvolutionBlock(d_model=32, hidden=64, dropout=0.0)
     b.eval()
     x = _t()
@@ -365,21 +365,21 @@ def test_sde_evolution_block():
 
 
 def test_custom_attention():
-    from src.models.registry import CustomAttention
+    from osa.models.registry import CustomAttention
     c = CustomAttention(d_model=32, nhead=4)
     x = _t()
     assert c(x).shape == x.shape
 
 
 def test_gated_mlp():
-    from src.models.registry import GatedMLP
+    from osa.models.registry import GatedMLP
     m = GatedMLP(d_model=32, expansion=4)
     x = _t()
     assert m(x).shape == x.shape
 
 
 def test_patch_merging():
-    from src.models.registry import PatchMerging
+    from osa.models.registry import PatchMerging
     pm = PatchMerging(d_model=32)
     x = _t(seq=16)
     out = pm(x)
@@ -391,7 +391,7 @@ def test_patch_merging():
 # =============================================================================
 
 def test_rnn_block():
-    from src.models.components.advanced_blocks import RNNBlock
+    from osa.models.components.advanced_blocks import RNNBlock
     b = RNNBlock(d_model=32, num_layers=2)
     b.eval()
     x = _t()
@@ -401,7 +401,7 @@ def test_rnn_block():
 
 
 def test_gru_block():
-    from src.models.components.advanced_blocks import GRUBlock
+    from osa.models.components.advanced_blocks import GRUBlock
     b = GRUBlock(d_model=32, num_layers=1)
     b.eval()
     x = _t()
@@ -411,7 +411,7 @@ def test_gru_block():
 
 
 def test_resconv_block():
-    from src.models.components.advanced_blocks import ResConvBlock
+    from osa.models.components.advanced_blocks import ResConvBlock
     b = ResConvBlock(d_model=32, kernel_size=3)
     b.eval()
     x = _t()
@@ -421,7 +421,7 @@ def test_resconv_block():
 
 
 def test_bitcn_block():
-    from src.models.components.advanced_blocks import BiTCNBlock
+    from osa.models.components.advanced_blocks import BiTCNBlock
     b = BiTCNBlock(d_model=32, kernel_size=3, dilation=2)
     b.eval()
     x = _t()
@@ -431,7 +431,7 @@ def test_bitcn_block():
 
 
 def test_patch_embedding_changes_seq():
-    from src.models.components.advanced_blocks import PatchEmbedding
+    from osa.models.components.advanced_blocks import PatchEmbedding
     b = PatchEmbedding(d_model=32, patch_size=4)
     x = _t(seq=32)
     out = b(x)
@@ -441,7 +441,7 @@ def test_patch_embedding_changes_seq():
 
 
 def test_unet1d_block():
-    from src.models.components.advanced_blocks import Unet1DBlock
+    from osa.models.components.advanced_blocks import Unet1DBlock
     b = Unet1DBlock(d_model=32)
     x = _t(seq=16)
     out = b(x)
@@ -449,21 +449,21 @@ def test_unet1d_block():
 
 
 def test_transformer_encoder_adapter():
-    from src.models.components.advanced_blocks import TransformerEncoderAdapter
+    from osa.models.components.advanced_blocks import TransformerEncoderAdapter
     b = TransformerEncoderAdapter(d_model=32, nhead=4, num_layers=2)
     x = _t()
     assert b(x).shape == x.shape
 
 
 def test_transformer_decoder_adapter():
-    from src.models.components.advanced_blocks import TransformerDecoderAdapter
+    from osa.models.components.advanced_blocks import TransformerDecoderAdapter
     b = TransformerDecoderAdapter(d_model=32, nhead=4, num_layers=2)
     x = _t()
     assert b(x).shape == x.shape
 
 
 def test_fourier_block():
-    from src.models.components.advanced_blocks import FourierBlock
+    from osa.models.components.advanced_blocks import FourierBlock
     b = FourierBlock(d_model=32, modes=8)
     x = _t(seq=32)
     out = b(x)
@@ -471,7 +471,7 @@ def test_fourier_block():
 
 
 def test_last_step_adapter_modes():
-    from src.models.components.advanced_blocks import LastStepAdapter
+    from osa.models.components.advanced_blocks import LastStepAdapter
     x = _t()
     for mode in ("last", "mean", "max"):
         b = LastStepAdapter(d_model=32, mode=mode)
@@ -480,7 +480,7 @@ def test_last_step_adapter_modes():
 
 
 def test_revin_norm_denorm():
-    from src.models.components.advanced_blocks import RevIN
+    from osa.models.components.advanced_blocks import RevIN
     b = RevIN(d_model=32)
     x = _t()
     x_norm = b(x, mode="norm")
@@ -495,7 +495,7 @@ def test_revin_norm_denorm():
 
 
 def test_revin_invalid_mode():
-    from src.models.components.advanced_blocks import RevIN
+    from osa.models.components.advanced_blocks import RevIN
     b = RevIN(d_model=32)
     x = _t()
     b(x, mode="norm")
@@ -507,7 +507,7 @@ def test_revin_invalid_mode():
 
 
 def test_flexible_patch_embed():
-    from src.models.components.advanced_blocks import FlexiblePatchEmbed
+    from osa.models.components.advanced_blocks import FlexiblePatchEmbed
     b = FlexiblePatchEmbed(d_model=32, patch_len=8, stride=4, in_channels=3, channel_independence=False)
     x = torch.randn(2, 64, 3)
     out = b(x)
@@ -515,7 +515,7 @@ def test_flexible_patch_embed():
 
 
 def test_flexible_patch_embed_channel_independence():
-    from src.models.components.advanced_blocks import FlexiblePatchEmbed
+    from osa.models.components.advanced_blocks import FlexiblePatchEmbed
     batch, seq, channels = 2, 64, 3
     b = FlexiblePatchEmbed(d_model=32, patch_len=8, stride=4, channel_independence=True)
     x = torch.randn(batch, seq, channels)
@@ -527,7 +527,7 @@ def test_flexible_patch_embed_channel_independence():
 
 
 def test_channel_rejoin_mean():
-    from src.models.components.advanced_blocks import ChannelRejoin
+    from osa.models.components.advanced_blocks import ChannelRejoin
     num_channels = 3
     b = ChannelRejoin(num_channels=num_channels, mode="mean")
     # Simulates batch*channels from channel-independent processing
@@ -537,7 +537,7 @@ def test_channel_rejoin_mean():
 
 
 def test_dlinear_block():
-    from src.models.components.advanced_blocks import DLinearBlock
+    from osa.models.components.advanced_blocks import DLinearBlock
     b = DLinearBlock(d_model=32, kernel_size=5)
     x = _t()
     out = b(x)
@@ -545,7 +545,7 @@ def test_dlinear_block():
 
 
 def test_layernorm_block():
-    from src.models.components.advanced_blocks import LayerNormBlock
+    from osa.models.components.advanced_blocks import LayerNormBlock
     b = LayerNormBlock(d_model=32)
     x = _t()
     out = b(x)
@@ -555,7 +555,7 @@ def test_layernorm_block():
 
 
 def test_timesnet_block():
-    from src.models.components.advanced_blocks import TimesNetBlock
+    from osa.models.components.advanced_blocks import TimesNetBlock
     b = TimesNetBlock(d_model=32, top_k=3)
     # min_seq_len=4
     x = _t(seq=32)
@@ -568,7 +568,7 @@ def test_timesnet_block():
 # =============================================================================
 
 def test_gbm_head_shapes_and_positivity():
-    from src.models.heads import GBMHead
+    from osa.models.heads import GBMHead
     h = GBMHead(latent_size=32)
     x = torch.randn(4, 32)
     mu, sigma = h(x)
@@ -577,7 +577,7 @@ def test_gbm_head_shapes_and_positivity():
 
 
 def test_sde_head():
-    from src.models.heads import SDEHead
+    from osa.models.heads import SDEHead
     h = SDEHead(latent_size=32, hidden=64)
     x = torch.randn(4, 32)
     mu, sigma = h(x)
@@ -586,7 +586,7 @@ def test_sde_head():
 
 
 def test_horizon_head():
-    from src.models.heads import HorizonHead
+    from osa.models.heads import HorizonHead
     h = HorizonHead(latent_size=32, horizon_max=48, nhead=4, n_layers=2)
     x = torch.randn(4, 16, 32)
     mu, sigma = h(x, horizon=12)
@@ -595,7 +595,7 @@ def test_horizon_head():
 
 
 def test_horizon_head_kv_compression():
-    from src.models.heads import HorizonHead
+    from osa.models.heads import HorizonHead
     h = HorizonHead(latent_size=32, horizon_max=24, nhead=4, kv_dim=16)
     x = torch.randn(2, 32, 32)
     mu, sigma = h(x, horizon=8)
@@ -603,7 +603,7 @@ def test_horizon_head_kv_compression():
 
 
 def test_horizon_head_clips_to_max():
-    from src.models.heads import HorizonHead
+    from osa.models.heads import HorizonHead
     import logging
     h = HorizonHead(latent_size=32, horizon_max=10, nhead=4)
     x = torch.randn(2, 16, 32)
@@ -613,7 +613,7 @@ def test_horizon_head_clips_to_max():
 
 
 def test_simple_horizon_head_all_pools():
-    from src.models.heads import SimpleHorizonHead
+    from osa.models.heads import SimpleHorizonHead
     for pool in ("mean", "max", "mean+max"):
         h = SimpleHorizonHead(latent_size=32, horizon_max=48, pool_type=pool)
         x = torch.randn(3, 16, 32)
@@ -623,7 +623,7 @@ def test_simple_horizon_head_all_pools():
 
 
 def test_simple_horizon_head_invalid_pool():
-    from src.models.heads import SimpleHorizonHead
+    from osa.models.heads import SimpleHorizonHead
     try:
         SimpleHorizonHead(latent_size=32, pool_type="invalid_pool_xyz")
         raise AssertionError("Should raise ValueError")
@@ -632,7 +632,7 @@ def test_simple_horizon_head_invalid_pool():
 
 
 def test_mixture_density_head():
-    from src.models.heads import MixtureDensityHead
+    from osa.models.heads import MixtureDensityHead
     h = MixtureDensityHead(latent_size=32, n_components=3, hidden=64)
     x = torch.randn(4, 32)
     mus, sigmas, weights = h(x)
@@ -642,7 +642,7 @@ def test_mixture_density_head():
 
 
 def test_vol_term_structure_head():
-    from src.models.heads import VolTermStructureHead
+    from osa.models.heads import VolTermStructureHead
     h = VolTermStructureHead(latent_size=32, hidden=64)
     x = torch.randn(4, 32)
     mu_seq, sigma_seq = h(x, horizon=12)
@@ -651,7 +651,7 @@ def test_vol_term_structure_head():
 
 
 def test_neural_bridge_head_no_price():
-    from src.models.heads import NeuralBridgeHead
+    from osa.models.heads import NeuralBridgeHead
     h = NeuralBridgeHead(latent_size=32, micro_steps=12, hidden_dim=64)
     x = torch.randn(4, 32)
     macro_ret, micro_returns, sigma = h(x)
@@ -665,7 +665,7 @@ def test_neural_bridge_head_no_price():
 
 
 def test_neural_bridge_head_with_price():
-    from src.models.heads import NeuralBridgeHead
+    from osa.models.heads import NeuralBridgeHead
     h = NeuralBridgeHead(latent_size=32, micro_steps=8)
     x = torch.randn(3, 32)
     price = torch.ones(3) * 100.0
@@ -676,7 +676,7 @@ def test_neural_bridge_head_with_price():
 
 
 def test_neural_sde_head():
-    from src.models.heads import NeuralSDEHead
+    from osa.models.heads import NeuralSDEHead
     with torch.no_grad():
         h = NeuralSDEHead(latent_size=32, hidden=32, solver="euler", adjoint=False)
         ctx = torch.randn(2, 32)
@@ -693,8 +693,8 @@ def test_neural_sde_head():
 # =============================================================================
 
 def test_hybrid_backbone_last_step():
-    from src.models.factory import HybridBackbone
-    from src.models.registry import TransformerBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import TransformerBlock
     bb = HybridBackbone(input_size=3, d_model=32, blocks=[TransformerBlock(d_model=32)])
     x = torch.randn(4, 16, 3)
     out = bb(x)
@@ -702,8 +702,8 @@ def test_hybrid_backbone_last_step():
 
 
 def test_hybrid_backbone_forward_sequence():
-    from src.models.factory import HybridBackbone
-    from src.models.registry import LSTMBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import LSTMBlock
     bb = HybridBackbone(input_size=3, d_model=32, blocks=[LSTMBlock(d_model=32)])
     x = torch.randn(4, 16, 3)
     out = bb.forward_sequence(x)
@@ -711,8 +711,8 @@ def test_hybrid_backbone_forward_sequence():
 
 
 def test_hybrid_backbone_multiple_blocks():
-    from src.models.factory import HybridBackbone
-    from src.models.registry import TransformerBlock, LSTMBlock, SDEEvolutionBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import TransformerBlock, LSTMBlock, SDEEvolutionBlock
     bb = HybridBackbone(
         input_size=3,
         d_model=32,
@@ -724,8 +724,8 @@ def test_hybrid_backbone_multiple_blocks():
 
 
 def test_hybrid_backbone_insert_layernorm():
-    from src.models.factory import HybridBackbone
-    from src.models.registry import TransformerBlock, LSTMBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import TransformerBlock, LSTMBlock
     bb = HybridBackbone(
         input_size=3,
         d_model=32,
@@ -740,7 +740,7 @@ def test_hybrid_backbone_insert_layernorm():
 
 
 def test_hybrid_backbone_empty_raises():
-    from src.models.factory import HybridBackbone
+    from osa.models.factory import HybridBackbone
     try:
         HybridBackbone(input_size=3, d_model=32, blocks=[])
         raise AssertionError("Should raise ValueError")
@@ -749,14 +749,14 @@ def test_hybrid_backbone_empty_raises():
 
 
 def test_hybrid_backbone_output_dim():
-    from src.models.factory import HybridBackbone
-    from src.models.registry import TransformerBlock
+    from osa.models.factory import HybridBackbone
+    from osa.models.registry import TransformerBlock
     bb = HybridBackbone(input_size=5, d_model=64, blocks=[TransformerBlock(d_model=64, nhead=4)])
     assert bb.output_dim == 64
 
 
 def test_parallel_fusion_gating():
-    from src.models.factory import ParallelFusion
+    from osa.models.factory import ParallelFusion
     paths = nn.ModuleList([nn.Linear(32, 32), nn.Linear(32, 32)])
     fusion = ParallelFusion(list(paths), merge_strategy="gating")
     x = torch.randn(4, 32)
@@ -765,7 +765,7 @@ def test_parallel_fusion_gating():
 
 
 def test_parallel_fusion_concat():
-    from src.models.factory import ParallelFusion
+    from osa.models.factory import ParallelFusion
     paths = [nn.Linear(32, 16), nn.Linear(32, 16)]
     fusion = ParallelFusion(paths, merge_strategy="concat")
     x = torch.randn(4, 32)
@@ -774,7 +774,7 @@ def test_parallel_fusion_concat():
 
 
 def test_parallel_fusion_too_few_paths_raises():
-    from src.models.factory import ParallelFusion
+    from osa.models.factory import ParallelFusion
     try:
         ParallelFusion([nn.Linear(32, 32)], merge_strategy="gating")
         raise AssertionError("Should raise ValueError")
@@ -783,7 +783,7 @@ def test_parallel_fusion_too_few_paths_raises():
 
 
 def test_parallel_fusion_bad_strategy_raises():
-    from src.models.factory import ParallelFusion
+    from osa.models.factory import ParallelFusion
     try:
         ParallelFusion([nn.Linear(32, 32), nn.Linear(32, 32)], merge_strategy="sum")
         raise AssertionError("Should raise ValueError")
@@ -796,12 +796,12 @@ def test_parallel_fusion_bad_strategy_raises():
 # =============================================================================
 
 def _synth(head):
-    from src.models.factory import SynthModel
+    from osa.models.factory import SynthModel
     return SynthModel(_backbone(), head)
 
 
 def test_synth_gbm():
-    from src.models.heads import GBMHead
+    from osa.models.heads import GBMHead
     model = _synth(GBMHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -811,7 +811,7 @@ def test_synth_gbm():
 
 
 def test_synth_sde():
-    from src.models.heads import SDEHead
+    from osa.models.heads import SDEHead
     model = _synth(SDEHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 50.0
     with torch.no_grad():
@@ -820,7 +820,7 @@ def test_synth_sde():
 
 
 def test_synth_horizon():
-    from src.models.heads import HorizonHead
+    from osa.models.heads import HorizonHead
     model = _synth(HorizonHead(latent_size=32, horizon_max=48, nhead=4))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -829,7 +829,7 @@ def test_synth_horizon():
 
 
 def test_synth_simple_horizon():
-    from src.models.heads import SimpleHorizonHead
+    from osa.models.heads import SimpleHorizonHead
     model = _synth(SimpleHorizonHead(latent_size=32, horizon_max=48))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -838,7 +838,7 @@ def test_synth_simple_horizon():
 
 
 def test_synth_mixture_density():
-    from src.models.heads import MixtureDensityHead
+    from osa.models.heads import MixtureDensityHead
     model = _synth(MixtureDensityHead(latent_size=32, n_components=3))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -847,7 +847,7 @@ def test_synth_mixture_density():
 
 
 def test_synth_vol_term_structure():
-    from src.models.heads import VolTermStructureHead
+    from osa.models.heads import VolTermStructureHead
     model = _synth(VolTermStructureHead(latent_size=32))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -856,7 +856,7 @@ def test_synth_vol_term_structure():
 
 
 def test_synth_neural_bridge():
-    from src.models.heads import NeuralBridgeHead
+    from osa.models.heads import NeuralBridgeHead
     model = _synth(NeuralBridgeHead(latent_size=32, micro_steps=8))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -865,7 +865,7 @@ def test_synth_neural_bridge():
 
 
 def test_synth_neural_sde():
-    from src.models.heads import NeuralSDEHead
+    from osa.models.heads import NeuralSDEHead
     model = _synth(NeuralSDEHead(latent_size=32, hidden=32, solver="euler"))
     x, p = torch.randn(2, 16, 3), torch.ones(2) * 100.0
     with torch.no_grad():
@@ -875,8 +875,8 @@ def test_synth_neural_sde():
 
 def test_synth_shape_contract_all_heads():
     """Shape invariant: (batch, n_paths, horizon) for every head type."""
-    from src.models.factory import SynthModel
-    from src.models.heads import (
+    from osa.models.factory import SynthModel
+    from osa.models.heads import (
         GBMHead, SDEHead, HorizonHead, SimpleHorizonHead,
         MixtureDensityHead, VolTermStructureHead, NeuralBridgeHead,
     )
@@ -908,7 +908,7 @@ def test_synth_shape_contract_all_heads():
 # =============================================================================
 
 def test_simulate_gbm_paths():
-    from src.models.factory import simulate_gbm_paths
+    from osa.models.factory import simulate_gbm_paths
     price = torch.ones(4) * 100.0
     mu = torch.zeros(4)
     sigma = torch.ones(4) * 0.01
@@ -918,7 +918,7 @@ def test_simulate_gbm_paths():
 
 
 def test_simulate_gbm_positivity_extremes():
-    from src.models.factory import simulate_gbm_paths
+    from osa.models.factory import simulate_gbm_paths
     price = torch.ones(2) * 100.0
     mu = torch.tensor([10.0, -10.0])
     sigma = torch.ones(2) * 5.0
@@ -928,7 +928,7 @@ def test_simulate_gbm_positivity_extremes():
 
 
 def test_simulate_gbm_dt():
-    from src.models.factory import simulate_gbm_paths
+    from osa.models.factory import simulate_gbm_paths
     price = torch.ones(2) * 100.0
     mu, sigma = torch.zeros(2), torch.ones(2) * 0.01
     p1 = simulate_gbm_paths(price, mu, sigma, horizon=8, n_paths=50, dt=1.0)
@@ -937,7 +937,7 @@ def test_simulate_gbm_dt():
 
 
 def test_simulate_horizon_paths():
-    from src.models.factory import simulate_horizon_paths
+    from osa.models.factory import simulate_horizon_paths
     batch, horizon = 4, 12
     price = torch.ones(batch) * 100.0
     mu_seq = torch.zeros(batch, horizon)
@@ -948,7 +948,7 @@ def test_simulate_horizon_paths():
 
 
 def test_simulate_bridge_paths():
-    from src.models.factory import simulate_bridge_paths
+    from osa.models.factory import simulate_bridge_paths
     batch, steps = 4, 12
     price = torch.ones(batch) * 100.0
     micro = torch.zeros(batch, steps)
@@ -959,7 +959,7 @@ def test_simulate_bridge_paths():
 
 
 def test_simulate_mixture_paths():
-    from src.models.factory import simulate_mixture_paths
+    from osa.models.factory import simulate_mixture_paths
     batch, K = 4, 3
     price = torch.ones(batch) * 100.0
     mus = torch.zeros(batch, K)
@@ -975,7 +975,7 @@ def test_simulate_mixture_paths():
 # =============================================================================
 
 def test_mock_data_source():
-    from src.data.market_data_loader import MockDataSource, AssetData
+    from osa.data.market_data_loader import MockDataSource, AssetData
     src = MockDataSource(length=300, freq="5min", seed=42)
     assets = src.load_data(["BTC", "ETH", "SYNTH"])
     assert len(assets) == 3
@@ -987,20 +987,20 @@ def test_mock_data_source():
 
 
 def test_mock_data_source_reproducible():
-    from src.data.market_data_loader import MockDataSource
+    from osa.data.market_data_loader import MockDataSource
     s1 = MockDataSource(length=100, seed=7).load_data(["X"])[0]
     s2 = MockDataSource(length=100, seed=7).load_data(["X"])[0]
     np.testing.assert_array_equal(s1.prices, s2.prices)
 
 
 def test_zscore_engineer_feature_dim():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     assert eng.feature_dim == 3
 
 
 def test_zscore_engineer_prepare_cache():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer(short_win=10, long_win=50)
     prices = np.linspace(100, 110, 300)
     cache = eng.prepare_cache(prices)
@@ -1009,7 +1009,7 @@ def test_zscore_engineer_prepare_cache():
 
 
 def test_zscore_engineer_make_input():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
     cache = eng.prepare_cache(prices)
@@ -1019,7 +1019,7 @@ def test_zscore_engineer_make_input():
 
 
 def test_zscore_engineer_make_target():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
     cache = eng.prepare_cache(prices)
@@ -1028,7 +1028,7 @@ def test_zscore_engineer_make_target():
 
 
 def test_zscore_engineer_get_volatility():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     prices = np.linspace(100, 110, 300)
     cache = eng.prepare_cache(prices)
@@ -1037,7 +1037,7 @@ def test_zscore_engineer_get_volatility():
 
 
 def test_zscore_engineer_clean_prices():
-    from src.data.market_data_loader import ZScoreEngineer
+    from osa.data.market_data_loader import ZScoreEngineer
     eng = ZScoreEngineer()
     # Contains NaN, inf, and zero — should all be cleaned
     prices = np.array([np.nan, 100.0, 101.0, np.inf, 0.0, 102.0])
@@ -1047,13 +1047,13 @@ def test_zscore_engineer_clean_prices():
 
 
 def test_wavelet_engineer_feature_dim():
-    from src.data.market_data_loader import WaveletEngineer
+    from osa.data.market_data_loader import WaveletEngineer
     eng = WaveletEngineer()
     assert eng.feature_dim == 5
 
 
 def test_wavelet_engineer_make_input():
-    from src.data.market_data_loader import WaveletEngineer
+    from osa.data.market_data_loader import WaveletEngineer
     eng = WaveletEngineer(wavelet="db4", level=3)
     prices = np.linspace(100, 110, 300)
     cache = eng.prepare_cache(prices)
@@ -1063,7 +1063,7 @@ def test_wavelet_engineer_make_input():
 
 
 def test_asset_data_dataclass():
-    from src.data.market_data_loader import AssetData
+    from osa.data.market_data_loader import AssetData
     ts = np.array([0, 1, 2])
     prices = np.array([100.0, 101.0, 102.0])
     a = AssetData(name="TEST", timestamps=ts, prices=prices)
@@ -1072,7 +1072,7 @@ def test_asset_data_dataclass():
 
 
 def test_market_dataset():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
     src = MockDataSource(length=500, freq="5min", seed=10)
     assets = src.load_data(["BTC"])
     eng = ZScoreEngineer()
@@ -1085,7 +1085,7 @@ def test_market_dataset():
 
 
 def test_market_dataset_vol_buckets():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataset
     src = MockDataSource(length=500, freq="5min", seed=42)
     assets = src.load_data(["SYNTH"])
     eng = ZScoreEngineer()
@@ -1096,7 +1096,7 @@ def test_market_dataset_vol_buckets():
 
 
 def test_market_data_loader_construction():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=600, freq="5min", seed=99)
     eng = ZScoreEngineer()
     loader = MarketDataLoader(
@@ -1108,7 +1108,7 @@ def test_market_data_loader_construction():
 
 
 def test_market_data_loader_get_price_series():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=400, freq="5min", seed=5)
     eng = ZScoreEngineer()
     loader = MarketDataLoader(
@@ -1124,7 +1124,7 @@ def test_market_data_loader_get_price_series():
 
 
 def test_market_data_loader_static_holdout():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     # Use a large dataset so all vol_buckets have ≥2 members for StratifiedShuffleSplit
     src = MockDataSource(length=3000, freq="5min", seed=7)
     eng = ZScoreEngineer()
@@ -1142,7 +1142,7 @@ def test_market_data_loader_static_holdout():
 
 
 def test_market_data_loader_multiple_assets():
-    from src.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
+    from osa.data.market_data_loader import MockDataSource, ZScoreEngineer, MarketDataLoader
     src = MockDataSource(length=500, freq="5min", seed=42)
     eng = ZScoreEngineer()
     loader = MarketDataLoader(
@@ -1153,7 +1153,7 @@ def test_market_data_loader_multiple_assets():
 
 
 def test_market_data_loader_wavelet():
-    from src.data.market_data_loader import MockDataSource, WaveletEngineer, MarketDataLoader
+    from osa.data.market_data_loader import MockDataSource, WaveletEngineer, MarketDataLoader
     src = MockDataSource(length=400, freq="5min", seed=1)
     eng = WaveletEngineer(wavelet="db4", level=3)
     loader = MarketDataLoader(
@@ -1168,7 +1168,7 @@ def test_market_data_loader_wavelet():
 # =============================================================================
 
 def test_strided_dataset_basic():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     series = torch.cumsum(torch.randn(200), dim=0)
     ds = StridedTimeSeriesDataset(series, context_len=32, pred_len=8, stride=4)
     assert len(ds) > 0
@@ -1179,7 +1179,7 @@ def test_strided_dataset_basic():
 
 
 def test_strided_dataset_2d_target():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     # 2D series: (T, features)
     series = torch.randn(150, 3)
     ds = StridedTimeSeriesDataset(series, context_len=16, pred_len=4, stride=1)
@@ -1189,7 +1189,7 @@ def test_strided_dataset_2d_target():
 
 
 def test_strided_dataset_past_covariates():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     past_cov = torch.randn(100, 2)
     ds = StridedTimeSeriesDataset(series, context_len=16, pred_len=4, past_covariates=past_cov)
@@ -1199,7 +1199,7 @@ def test_strided_dataset_past_covariates():
 
 
 def test_strided_dataset_future_covariates():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     future_cov = torch.randn(100, 3)
     ds = StridedTimeSeriesDataset(series, context_len=16, pred_len=4, future_covariates=future_cov)
@@ -1208,7 +1208,7 @@ def test_strided_dataset_future_covariates():
 
 
 def test_strided_dataset_too_short_raises():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     try:
         StridedTimeSeriesDataset(torch.randn(10), context_len=8, pred_len=8, stride=1)
         raise AssertionError("Should raise ValueError")
@@ -1217,7 +1217,7 @@ def test_strided_dataset_too_short_raises():
 
 
 def test_strided_dataset_invalid_params_raise():
-    from src.data.base_dataset import StridedTimeSeriesDataset
+    from osa.data.base_dataset import StridedTimeSeriesDataset
     series = torch.randn(100)
     for bad_kwargs in [
         {"context_len": 0, "pred_len": 4},
@@ -1232,7 +1232,7 @@ def test_strided_dataset_invalid_params_raise():
 
 
 def test_feature_engineer_base():
-    from src.data.base_dataset import FeatureEngineerBase
+    from osa.data.base_dataset import FeatureEngineerBase
     eng = FeatureEngineerBase()
     x = torch.randn(10, 3)
     assert torch.equal(eng.transform_history(x), x)
@@ -1245,7 +1245,7 @@ def test_feature_engineer_base():
 # =============================================================================
 
 def test_crps_ensemble_perfect_forecast():
-    from src.research.metrics import crps_ensemble
+    from osa.research.metrics import crps_ensemble
     target = torch.tensor([1.0, 2.0, 3.0])
     sims = target.unsqueeze(-1).expand(-1, 200)
     crps = crps_ensemble(sims, target)
@@ -1256,7 +1256,7 @@ def test_crps_ensemble_perfect_forecast():
 
 
 def test_crps_ensemble_batch_horizon():
-    from src.research.metrics import crps_ensemble
+    from osa.research.metrics import crps_ensemble
     batch, horizon, n_paths = 4, 12, 100
     sims = torch.randn(batch, horizon, n_paths)
     target = torch.randn(batch, horizon)
@@ -1267,7 +1267,7 @@ def test_crps_ensemble_batch_horizon():
 
 
 def test_crps_ensemble_worse_is_higher():
-    from src.research.metrics import crps_ensemble
+    from osa.research.metrics import crps_ensemble
     target = torch.zeros(10)
     good_sims = torch.randn(10, 100) * 0.01
     bad_sims = torch.randn(10, 100) * 10.0
@@ -1283,7 +1283,7 @@ def test_crps_ensemble_analytical_gaussian():
     CRPS equals sigma / sqrt(pi).  With 10 000 paths and 5 000 targets we should
     be within 5% of the analytical value.
     """
-    from src.research.metrics import crps_ensemble
+    from osa.research.metrics import crps_ensemble
     import math
 
     torch.manual_seed(0)
@@ -1304,7 +1304,7 @@ def test_crps_ensemble_analytical_gaussian():
 
 
 def test_afcrps_ensemble():
-    from src.research.metrics import afcrps_ensemble
+    from osa.research.metrics import afcrps_ensemble
     batch, n = 4, 50
     sims = torch.randn(batch, n)
     target = torch.randn(batch)
@@ -1315,7 +1315,7 @@ def test_afcrps_ensemble():
 
 
 def test_afcrps_alpha0_matches_crps():
-    from src.research.metrics import afcrps_ensemble, crps_ensemble
+    from osa.research.metrics import afcrps_ensemble, crps_ensemble
     sims = torch.randn(3, 50)
     target = torch.randn(3)
     c_af = afcrps_ensemble(sims, target, alpha=0.0)
@@ -1324,7 +1324,7 @@ def test_afcrps_alpha0_matches_crps():
 
 
 def test_log_likelihood_shapes():
-    from src.research.metrics import log_likelihood
+    from osa.research.metrics import log_likelihood
     sims = torch.randn(4, 100)
     target = torch.randn(4)
     ll = log_likelihood(sims, target)
@@ -1332,7 +1332,7 @@ def test_log_likelihood_shapes():
 
 
 def test_log_likelihood_ordering():
-    from src.research.metrics import log_likelihood
+    from osa.research.metrics import log_likelihood
     target = torch.zeros(5)
     sims_good = torch.randn(5, 100) * 0.01
     sims_bad = torch.randn(5, 100) * 10.0
@@ -1342,14 +1342,14 @@ def test_log_likelihood_ordering():
 
 
 def test_get_interval_steps():
-    from src.research.metrics import get_interval_steps
+    from osa.research.metrics import get_interval_steps
     assert get_interval_steps(300, 60) == 5
     assert get_interval_steps(3600, 300) == 12
     assert get_interval_steps(86400, 3600) == 24
 
 
 def test_calculate_price_changes_returns():
-    from src.research.metrics import calculate_price_changes_over_intervals
+    from osa.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 102.0, 101.0, 104.0, 103.0, 106.0]])
     changes = calculate_price_changes_over_intervals(prices, interval_steps=2)
     assert changes.shape[0] == 1
@@ -1357,14 +1357,14 @@ def test_calculate_price_changes_returns():
 
 
 def test_calculate_price_changes_absolute():
-    from src.research.metrics import calculate_price_changes_over_intervals
+    from osa.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 102.0, 101.0, 104.0, 103.0, 106.0]])
     changes = calculate_price_changes_over_intervals(prices, interval_steps=2, absolute_price=True)
     assert changes.shape[0] == 1
 
 
 def test_calculate_price_changes_edge_cases():
-    from src.research.metrics import calculate_price_changes_over_intervals
+    from osa.research.metrics import calculate_price_changes_over_intervals
     prices = np.array([[100.0, 101.0]])
     # interval_steps >= T => empty result
     result = calculate_price_changes_over_intervals(prices, interval_steps=5)
@@ -1375,7 +1375,7 @@ def test_calculate_price_changes_edge_cases():
 
 
 def test_label_observed_blocks():
-    from src.research.metrics import label_observed_blocks
+    from osa.research.metrics import label_observed_blocks
     arr = np.array([1.0, 2.0, np.nan, 4.0, 5.0])
     labels = label_observed_blocks(arr)
     assert labels[0] == labels[1]   # same block
@@ -1385,7 +1385,7 @@ def test_label_observed_blocks():
 
 
 def test_generate_adaptive_intervals():
-    from src.research.metrics import generate_adaptive_intervals
+    from osa.research.metrics import generate_adaptive_intervals
     intervals = generate_adaptive_intervals(horizon_steps=100, time_increment=60, min_intervals=3)
     assert isinstance(intervals, dict) and len(intervals) >= 1
     for name, secs in intervals.items():
@@ -1393,14 +1393,14 @@ def test_generate_adaptive_intervals():
 
 
 def test_generate_adaptive_intervals_short_horizon():
-    from src.research.metrics import generate_adaptive_intervals
+    from osa.research.metrics import generate_adaptive_intervals
     # very short horizon
     intervals = generate_adaptive_intervals(horizon_steps=2, time_increment=60)
     assert isinstance(intervals, dict)
 
 
 def test_filter_valid_intervals():
-    from src.research.metrics import filter_valid_intervals, SCORING_INTERVALS
+    from osa.research.metrics import filter_valid_intervals, SCORING_INTERVALS
     # With 10 steps at 60s each (600s total), only 5min (300s=5 steps) fits
     valid = filter_valid_intervals(SCORING_INTERVALS, horizon_steps=10, time_increment=60)
     assert isinstance(valid, dict)
@@ -1411,7 +1411,7 @@ def test_filter_valid_intervals():
 
 
 def test_crps_multi_interval_scorer_adaptive():
-    from src.research.metrics import CRPSMultiIntervalScorer
+    from osa.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=60, adaptive=True)
     sims = torch.ones(50, 20) * 100.0 + torch.randn(50, 20) * 0.5
     real = torch.ones(20) * 100.0
@@ -1421,7 +1421,7 @@ def test_crps_multi_interval_scorer_adaptive():
 
 
 def test_crps_multi_interval_scorer_nonadaptive():
-    from src.research.metrics import CRPSMultiIntervalScorer
+    from osa.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=300, adaptive=False)
     sims = torch.ones(50, 1000) * 100.0
     real = torch.ones(1000) * 100.0
@@ -1430,14 +1430,14 @@ def test_crps_multi_interval_scorer_nonadaptive():
 
 
 def test_crps_scorer_caches_intervals():
-    from src.research.metrics import CRPSMultiIntervalScorer
+    from osa.research.metrics import CRPSMultiIntervalScorer
     scorer = CRPSMultiIntervalScorer(time_increment=60, adaptive=True)
     scorer.get_intervals_for_horizon(50)
     assert 50 in scorer._interval_cache
 
 
 def test_crps_scorer_invalid_time_increment():
-    from src.research.metrics import CRPSMultiIntervalScorer
+    from osa.research.metrics import CRPSMultiIntervalScorer
     try:
         CRPSMultiIntervalScorer(time_increment=0)
         raise AssertionError("Should raise ValueError")
@@ -1450,14 +1450,14 @@ def test_crps_scorer_invalid_time_increment():
 # =============================================================================
 
 def test_prepare_paths_for_crps():
-    from src.research.trainer import prepare_paths_for_crps
+    from osa.research.trainer import prepare_paths_for_crps
     paths = torch.randn(4, 100, 12)   # (batch, n_paths, horizon)
     ready = prepare_paths_for_crps(paths)
     assert ready.shape == (4, 12, 100)  # (batch, horizon, n_paths)
 
 
 def test_data_to_model_adapter_shapes():
-    from src.research.trainer import DataToModelAdapter
+    from osa.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"))
     batch = {"inputs": torch.randn(4, 3, 32), "target": torch.randn(4, 1, 8)}
     result = adapter(batch)
@@ -1467,7 +1467,7 @@ def test_data_to_model_adapter_shapes():
 
 
 def test_data_to_model_adapter_zero_logreturns():
-    from src.research.trainer import DataToModelAdapter
+    from osa.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"), target_is_log_return=True)
     batch = {"inputs": torch.randn(2, 3, 16), "target": torch.zeros(2, 1, 4)}
     result = adapter(batch)
@@ -1476,7 +1476,7 @@ def test_data_to_model_adapter_zero_logreturns():
 
 
 def test_data_to_model_adapter_bad_input_raises():
-    from src.research.trainer import DataToModelAdapter
+    from osa.research.trainer import DataToModelAdapter
     adapter = DataToModelAdapter(device=torch.device("cpu"))
     bad_batch = {"inputs": torch.randn(4, 32), "target": torch.randn(4, 1, 8)}  # 2D input
     try:
@@ -1487,10 +1487,10 @@ def test_data_to_model_adapter_bad_input_raises():
 
 
 def test_trainer_train_step():
-    from src.research.trainer import Trainer
-    from src.models.factory import SynthModel, HybridBackbone
-    from src.models.registry import LSTMBlock
-    from src.models.heads import GBMHead
+    from osa.research.trainer import Trainer
+    from osa.models.factory import SynthModel, HybridBackbone
+    from osa.models.registry import LSTMBlock
+    from osa.models.heads import GBMHead
 
     bb = HybridBackbone(input_size=3, d_model=16, blocks=[LSTMBlock(d_model=16)])
     model = SynthModel(bb, GBMHead(latent_size=16))
@@ -1509,10 +1509,10 @@ def test_trainer_train_step():
 
 
 def test_trainer_train_step_afcrps_vs_crps():
-    from src.research.trainer import Trainer
-    from src.models.factory import SynthModel, HybridBackbone
-    from src.models.registry import TransformerBlock
-    from src.models.heads import SDEHead
+    from osa.research.trainer import Trainer
+    from osa.models.factory import SynthModel, HybridBackbone
+    from osa.models.registry import TransformerBlock
+    from osa.models.heads import SDEHead
 
     def make_trainer(alpha):
         bb = HybridBackbone(input_size=3, d_model=16, blocks=[TransformerBlock(d_model=16, nhead=2)])
@@ -1530,10 +1530,10 @@ def test_trainer_train_step_afcrps_vs_crps():
 
 
 def test_trainer_validate():
-    from src.research.trainer import Trainer
-    from src.models.factory import SynthModel, HybridBackbone
-    from src.models.registry import LSTMBlock
-    from src.models.heads import GBMHead
+    from osa.research.trainer import Trainer
+    from osa.models.factory import SynthModel, HybridBackbone
+    from osa.models.registry import LSTMBlock
+    from osa.models.heads import GBMHead
 
     bb = HybridBackbone(input_size=3, d_model=16, blocks=[LSTMBlock(d_model=16)])
     model = SynthModel(bb, GBMHead(latent_size=16))
@@ -1560,29 +1560,29 @@ def test_trainer_validate():
 # =============================================================================
 
 def test_build_model_from_dict():
-    from src.models.factory import build_model, SynthModel
+    from osa.models.factory import build_model, SynthModel
     cfg = {
         "backbone": {
-            "_target_": "src.models.factory.HybridBackbone",
+            "_target_": "osa.models.factory.HybridBackbone",
             "input_size": 3, "d_model": 16,
-            "blocks": [{"_target_": "src.models.registry.TransformerBlock", "d_model": 16, "nhead": 2}],
+            "blocks": [{"_target_": "osa.models.registry.TransformerBlock", "d_model": 16, "nhead": 2}],
         },
-        "head": {"_target_": "src.models.heads.GBMHead", "latent_size": 16},
+        "head": {"_target_": "osa.models.heads.GBMHead", "latent_size": 16},
     }
     model = build_model(cfg)
     assert isinstance(model, SynthModel)
 
 
 def test_build_model_latent_mismatch_raises():
-    from src.models.factory import build_model
+    from osa.models.factory import build_model
     cfg = {
         "backbone": {
-            "_target_": "src.models.factory.HybridBackbone",
+            "_target_": "osa.models.factory.HybridBackbone",
             "input_size": 3, "d_model": 32,
-            "blocks": [{"_target_": "src.models.registry.LSTMBlock", "d_model": 32}],
+            "blocks": [{"_target_": "osa.models.registry.LSTMBlock", "d_model": 32}],
         },
         "head": {
-            "_target_": "src.models.heads.GBMHead",
+            "_target_": "osa.models.heads.GBMHead",
             "latent_size": 16,   # wrong — backbone outputs 32
         },
     }
@@ -1594,9 +1594,9 @@ def test_build_model_latent_mismatch_raises():
 
 
 def test_smoketest_model():
-    from src.models.factory import _smoke_test_model, SynthModel, HybridBackbone
-    from src.models.registry import LSTMBlock
-    from src.models.heads import GBMHead
+    from osa.models.factory import _smoke_test_model, SynthModel, HybridBackbone
+    from osa.models.registry import LSTMBlock
+    from osa.models.heads import GBMHead
 
     bb = HybridBackbone(input_size=5, d_model=16, blocks=[LSTMBlock(d_model=16)])
     model = SynthModel(bb, GBMHead(latent_size=16))
@@ -1604,7 +1604,7 @@ def test_smoketest_model():
 
 
 def test_head_registry_all_8_heads():
-    from src.models.factory import HEAD_REGISTRY
+    from osa.models.factory import HEAD_REGISTRY
     expected = [
         "gbm", "sde", "neural_sde", "horizon", "simple_horizon",
         "mixture_density", "vol_term_structure", "neural_bridge",
@@ -1614,8 +1614,8 @@ def test_head_registry_all_8_heads():
 
 
 def test_create_model_idempotent():
-    from src.models.factory import create_model, SynthModel
-    from src.models.heads import GBMHead
+    from osa.models.factory import create_model, SynthModel
+    from osa.models.heads import GBMHead
     model = SynthModel(_backbone(), GBMHead(latent_size=32))
     # Passing an already-built model should return it unchanged
     result = create_model(model)

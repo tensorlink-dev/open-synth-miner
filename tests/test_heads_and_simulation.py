@@ -4,14 +4,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.models.factory import (
+from osa.models.factory import (
     MAX_LOG_RETURN_CLAMP,
     simulate_bridge_paths,
     simulate_gbm_paths,
     simulate_horizon_paths,
     simulate_mixture_paths,
 )
-from src.models.heads import (
+from osa.models.heads import (
     GBMHead, HorizonHead, SimpleHorizonHead,
     MixtureDensityHead, VolTermStructureHead,
     NeuralBridgeHead, SDEHead,

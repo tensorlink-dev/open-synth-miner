@@ -8,10 +8,10 @@ import torch.optim as optim
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 
-from src.models.factory import create_model, get_model
-from src.research.backtest_runner import BacktestRunner
-from src.research.metrics import CRPSMultiIntervalScorer
-from src.research.trainer import Trainer
+from osa.models.factory import create_model, get_model
+from osa.research.backtest_runner import BacktestRunner
+from osa.research.metrics import CRPSMultiIntervalScorer
+from osa.research.trainer import Trainer
 
 
 class AblationExperiment:

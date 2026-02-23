@@ -1,6 +1,6 @@
 """Data loading utilities for Open Synth Miner."""
 
-from src.data.market_data_loader import (
+from osa.data.market_data_loader import (
     AssetData,
     DataSource,
     FeatureEngineer,
@@ -14,7 +14,7 @@ from src.data.market_data_loader import (
     WaveletEngineer,
     ZScoreEngineer,
 )
-from src.data.regime_loader import (
+from osa.data.regime_loader import (
     HOURLY_FEATURE_NAMES,
     AggregationStep,
     ClusteringStrategy,

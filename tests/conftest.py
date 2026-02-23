@@ -10,5 +10,5 @@ def _discover_all_components():
     blocks (e.g., rnnblock, grublock) find them in the registry without each
     test needing to call discover_components() individually.
     """
-    from src.models.registry import discover_components
+    from osa.models.registry import discover_components
     discover_components("src/models/components")

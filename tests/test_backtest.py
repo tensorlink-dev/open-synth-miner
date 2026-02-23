@@ -6,11 +6,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from src.data.base_dataset import StridedTimeSeriesDataset
-from src.models.factory import HybridBackbone, SynthModel
-from src.models.heads import GBMHead
-from src.models.registry import LSTMBlock
-from src.research.backtest import ChallengerVsChampion
+from osa.data.base_dataset import StridedTimeSeriesDataset
+from osa.models.factory import HybridBackbone, SynthModel
+from osa.models.heads import GBMHead
+from osa.models.registry import LSTMBlock
+from osa.research.backtest import ChallengerVsChampion
 
 
 # ---------------------------------------------------------------------------
@@ -78,10 +78,10 @@ class TestChallengerVsChampion:
         # Patch get_model so it returns the pre-built models without HF loading.
         # Patch _make_dataloader to bypass StridedTimeSeriesDataset's squeeze which
         # collapses 1-D targets to (B, context_len), incompatible with HybridBackbone.
-        with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+        with patch("osa.research.backtest.get_model", side_effect=[model_b, model_a]), \
              patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
-             patch("src.research.backtest.wandb") as mock_wandb, \
-             patch("src.research.backtest.log_backtest_results"):
+             patch("osa.research.backtest.wandb") as mock_wandb, \
+             patch("osa.research.backtest.log_backtest_results"):
             mock_wandb.Table.return_value = MagicMock()
             mock_wandb.Histogram.return_value = MagicMock()
             result = cvc.run(log_to_wandb=True)
@@ -95,10 +95,10 @@ class TestChallengerVsChampion:
 
         cvc = self._build_cvc(model_a=model_a, model_b=model_b)
 
-        with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+        with patch("osa.research.backtest.get_model", side_effect=[model_b, model_a]), \
              patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
-             patch("src.research.backtest.wandb") as mock_wandb, \
-             patch("src.research.backtest.log_backtest_results") as mock_log:
+             patch("osa.research.backtest.wandb") as mock_wandb, \
+             patch("osa.research.backtest.log_backtest_results") as mock_log:
             result = cvc.run(log_to_wandb=False)
 
         mock_wandb.log.assert_not_called()
@@ -112,10 +112,10 @@ class TestChallengerVsChampion:
 
         cvc = self._build_cvc(model_a=model_a, model_b=model_b)
 
-        with patch("src.research.backtest.get_model", side_effect=[model_b, model_a]), \
+        with patch("osa.research.backtest.get_model", side_effect=[model_b, model_a]), \
              patch.object(cvc, "_make_dataloader", return_value=_make_fake_loader()), \
-             patch("src.research.backtest.wandb"), \
-             patch("src.research.backtest.log_backtest_results"):
+             patch("osa.research.backtest.wandb"), \
+             patch("osa.research.backtest.log_backtest_results"):
             result = cvc.run(log_to_wandb=False)
 
         assert "variance_spread" in result["spread"]

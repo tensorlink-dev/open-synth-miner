@@ -706,7 +706,7 @@ def create_model(cfg: DictConfig | Dict | SynthModel) -> SynthModel:
     if isinstance(model_cfg, dict) and "_target_" not in model_cfg and (
         "backbone" in model_cfg or "head" in model_cfg
     ):
-        model_cfg = {"_target_": "src.models.factory.SynthModel", **model_cfg}
+        model_cfg = {"_target_": "osa.models.factory.SynthModel", **model_cfg}
 
     if isinstance(model_cfg, (DictConfig, dict)) and "_target_" in model_cfg:
         model = instantiate(model_cfg if isinstance(model_cfg, DictConfig) else OmegaConf.create(model_cfg))
