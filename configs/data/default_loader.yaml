@@ -1,13 +1,13 @@
 data:
-  _target_: src.data.market_data_loader.MarketDataLoader
+  _target_: osa.data.market_data_loader.MarketDataLoader
   data_source:
-    _target_: src.data.market_data_loader.MockDataSource
+    _target_: osa.data.market_data_loader.MockDataSource
     length: 5000
     freq: "5min"
     seed: 7
     base_price: 100.0
   engineer:
-    _target_: src.data.market_data_loader.ZScoreEngineer
+    _target_: osa.data.market_data_loader.ZScoreEngineer
     short_win: 20
     long_win: 200
   assets: ["SYNTH"]

@@ -11,14 +11,14 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.models.factory import HybridBackbone, SynthModel
-from src.models.heads import GBMHead, SDEHead
-from src.models.registry import (
+from osa.models.factory import HybridBackbone, SynthModel
+from osa.models.heads import GBMHead, SDEHead
+from osa.models.registry import (
     LSTMBlock,
     SDEEvolutionBlock,
     TransformerBlock,
 )
-from src.research.trainer import Trainer
+from osa.research.trainer import Trainer
 
 
 # ---------------------------------------------------------------------------

@@ -1,26 +1,26 @@
 project: synth-miner
 
 model:
-  _target_: src.models.factory.SynthModel
+  _target_: osa.models.factory.SynthModel
   backbone:
-    _target_: src.models.factory.HybridBackbone
+    _target_: osa.models.factory.HybridBackbone
     input_size: 4
     d_model: 32
     blocks:
-      - _target_: src.models.registry.TransformerBlock
+      - _target_: osa.models.registry.TransformerBlock
         d_model: 32
         nhead: 4
-      - _target_: src.models.factory.ParallelFusion
+      - _target_: osa.models.factory.ParallelFusion
         merge_strategy: gating
         paths:
-          - _target_: src.models.registry.TransformerBlock
+          - _target_: osa.models.registry.TransformerBlock
             d_model: 32
             nhead: 2
-          - _target_: src.models.registry.SDEEvolutionBlock
+          - _target_: osa.models.registry.SDEEvolutionBlock
             d_model: 32
             hidden: 48
   head:
-    _target_: src.models.heads.GBMHead
+    _target_: osa.models.heads.GBMHead
     latent_size: 32
 
 training:

@@ -3,7 +3,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from src.data.regime_loader import (
+from osa.data.regime_loader import (
     HOURLY_FEATURE_NAMES,
     AggregationStep,
     ClusteringStrategy,
@@ -28,7 +28,7 @@ from src.data.regime_loader import (
     generate_walk_forward_folds,
     run_pipeline,
 )
-from src.data.market_data_loader import AssetData, MockDataSource
+from osa.data.market_data_loader import AssetData, MockDataSource
 
 
 # ---------------------------------------------------------------------------

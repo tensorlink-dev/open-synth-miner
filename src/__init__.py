@@ -6,7 +6,7 @@ projects can simply import ``open_synth_miner`` without drilling
 into submodules.
 """
 
-from src.models.factory import (
+from osa.models.factory import (
     SynthModel,
     HybridBackbone,
     ParallelFusion,
@@ -15,9 +15,9 @@ from src.models.factory import (
     get_model,
     simulate_gbm_paths,
 )
-from src.models.registry import discover_components, registry
-from src.data import MarketDataLoader
-from src.research.experiment_mgr import run_experiment
+from osa.models.registry import discover_components, registry
+from osa.data import MarketDataLoader
+from osa.research.experiment_mgr import run_experiment
 
 __all__ = [
     "SynthModel",

@@ -4,7 +4,7 @@ Previously lived at the repo root; moved into tests/ so pytest collects it.
 """
 import torch
 
-from src.research.metrics import (
+from osa.research.metrics import (
     CRPSMultiIntervalScorer,
     SCORING_INTERVALS,
     filter_valid_intervals,

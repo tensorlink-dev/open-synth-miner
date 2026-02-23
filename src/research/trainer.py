@@ -7,8 +7,8 @@ import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from src.models.factory import SynthModel
-from src.tracking.wandb_logger import log_experiment_results
+from osa.models.factory import SynthModel
+from osa.tracking.wandb_logger import log_experiment_results
 from .metrics import CRPSMultiIntervalScorer, afcrps_ensemble, crps_ensemble, log_likelihood
 
 

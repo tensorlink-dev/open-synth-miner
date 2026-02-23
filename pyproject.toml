@@ -39,12 +39,30 @@ dev = [
     "torchsde>=0.2.6",
 ]
 
-[tool.setuptools.packages.find]
-include = ["src*", "open_synth_miner*"]
-
 [tool.setuptools]
 include-package-data = true
 py-modules = ["main"]
+packages = [
+    "osa",
+    "osa.data",
+    "osa.models",
+    "osa.models.components",
+    "osa.models.components.attention",
+    "osa.models.components.patches",
+    "osa.research",
+    "osa.tracking",
+    "open_synth_miner",
+]
+
+[tool.setuptools.package-dir]
+osa = "src"
+"osa.data" = "src/data"
+"osa.models" = "src/models"
+"osa.models.components" = "src/models/components"
+"osa.models.components.attention" = "src/models/components/attention"
+"osa.models.components.patches" = "src/models/components/patches"
+"osa.research" = "src/research"
+"osa.tracking" = "src/tracking"
 
 [tool.setuptools.package-data]
 "*" = [

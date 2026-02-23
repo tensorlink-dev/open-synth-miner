@@ -2,9 +2,9 @@
 import torch
 import pytest
 
-from src.models.components.advanced_blocks import RevIN, TransformerBlock
-from src.models.factory import HybridBackbone, SynthModel
-from src.models.heads import GBMHead
+from osa.models.components.advanced_blocks import RevIN, TransformerBlock
+from osa.models.factory import HybridBackbone, SynthModel
+from osa.models.heads import GBMHead
 
 
 def test_synthmodel_collects_revin_layers():

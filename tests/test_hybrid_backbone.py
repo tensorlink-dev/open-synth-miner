@@ -12,13 +12,13 @@ pytest.importorskip("omegaconf", reason="omegaconf not installed")
 from hydra.utils import instantiate
 from omegaconf import OmegaConf
 
-from src.models.components.advanced_blocks import (
+from osa.models.components.advanced_blocks import (
     ChannelRejoin,
     DLinearBlock,
     FlexiblePatchEmbed,
     LayerNormBlock,
 )
-from src.models.factory import HybridBackbone
+from osa.models.factory import HybridBackbone
 
 # Resolve config paths relative to this file so tests pass regardless of
 # the working directory from which pytest is invoked.

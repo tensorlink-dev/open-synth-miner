@@ -1,7 +1,7 @@
 import torch
 
-from src.models.registry import registry
-from src.models.components.advanced_blocks import LayerNormBlock
+from osa.models.registry import registry
+from osa.models.components.advanced_blocks import LayerNormBlock
 
 
 def test_layernorm_block_registered():

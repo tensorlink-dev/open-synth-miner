@@ -4,7 +4,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from src.research.trainer import prepare_paths_for_crps
+from osa.research.trainer import prepare_paths_for_crps
 
 
 class TestPreparePathsForCRPS:

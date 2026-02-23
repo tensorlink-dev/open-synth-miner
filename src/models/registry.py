@@ -247,12 +247,17 @@ def _resolve_src_root(path: pathlib.Path, package_root: str = "src") -> pathlib.
     raise ValueError(f"Could not locate package root '{package_root}' from path: {path}")
 
 
-def discover_components(package_path: str | pathlib.Path, package_root: str = "src") -> None:
+def discover_components(
+    package_path: str | pathlib.Path,
+    package_root: str = "src",
+    module_prefix: str = "osa",
+) -> None:
     """Recursively import modules to trigger registry decorators.
 
     Args:
         package_path: Filesystem path to the component/blocks tree (e.g., ``src/models/components``).
-        package_root: Logical root package name (defaults to ``src``).
+        package_root: Filesystem directory name of the package root (defaults to ``src``).
+        module_prefix: Python package name used for imports (defaults to ``osa``).
     """
 
     package_dir = pathlib.Path(package_path).resolve()
@@ -267,7 +272,7 @@ def discover_components(package_path: str | pathlib.Path, package_root: str = "s
         if path.name == "__init__.py":
             continue
         relative_parts: Iterable[str] = path.relative_to(src_root).with_suffix("").parts
-        module_name = ".".join((src_root.name, *relative_parts))
+        module_name = ".".join((module_prefix, *relative_parts))
         importlib.import_module(module_name)
 
 

@@ -1,7 +1,7 @@
 import pandas as pd
 import pytest
 
-from src.data.market_data_loader import HFParquetSource
+from osa.data.market_data_loader import HFParquetSource
 
 
 def test_hf_parquet_source_sets_dataset_repo_type(tmp_path, monkeypatch):
@@ -21,7 +21,7 @@ def test_hf_parquet_source_sets_dataset_repo_type(tmp_path, monkeypatch):
         recorded.update(repo_id=repo_id, filename=filename, revision=revision, repo_type=repo_type)
         return str(parquet_path)
 
-    monkeypatch.setattr("src.data.market_data_loader.hf_hub_download", fake_download)
+    monkeypatch.setattr("osa.data.market_data_loader.hf_hub_download", fake_download)
 
     source = HFParquetSource(repo_id="tensorlink-dev/open-synth-training-data", filename="btc.parquet")
     assets = source.load_data(["BTC"])
@@ -49,7 +49,7 @@ def test_hf_parquet_source_allows_custom_repo_type(tmp_path, monkeypatch, custom
         recorded.update(repo_type=repo_type)
         return str(parquet_path)
 
-    monkeypatch.setattr("src.data.market_data_loader.hf_hub_download", fake_download)
+    monkeypatch.setattr("osa.data.market_data_loader.hf_hub_download", fake_download)
 
     source = HFParquetSource(repo_id="id", filename="price.parquet", repo_type=custom_type)
     assets = source.load_data(["asset"])
@@ -72,7 +72,7 @@ def test_hf_parquet_source_accepts_close_price_fallback(tmp_path, monkeypatch):
     parquet_path = tmp_path / "eth.parquet"
     frame.to_parquet(parquet_path)
 
-    monkeypatch.setattr("src.data.market_data_loader.hf_hub_download", lambda **_: str(parquet_path))
+    monkeypatch.setattr("osa.data.market_data_loader.hf_hub_download", lambda **_: str(parquet_path))
 
     source = HFParquetSource(repo_id="id", filename="eth.parquet")
     assets = source.load_data(["ETH"])
@@ -97,7 +97,7 @@ def test_hf_parquet_source_supports_covariates(tmp_path, monkeypatch):
     parquet_path = tmp_path / "btc_ohlcv.parquet"
     frame.to_parquet(parquet_path)
 
-    monkeypatch.setattr("src.data.market_data_loader.hf_hub_download", lambda **_: str(parquet_path))
+    monkeypatch.setattr("osa.data.market_data_loader.hf_hub_download", lambda **_: str(parquet_path))
 
     source = HFParquetSource(
         repo_id="id",

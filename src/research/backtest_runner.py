@@ -7,9 +7,9 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 
-from src.models.factory import SynthModel
-from src.research.metrics import CRPSMultiIntervalScorer, SCORING_INTERVALS, calculate_crps_for_paths
-from src.tracking.wandb_logger import log_backtest_results
+from osa.models.factory import SynthModel
+from osa.research.metrics import CRPSMultiIntervalScorer, SCORING_INTERVALS, calculate_crps_for_paths
+from osa.tracking.wandb_logger import log_backtest_results
 
 
 class BacktestRunner:

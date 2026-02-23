@@ -6,11 +6,11 @@ from omegaconf import DictConfig, OmegaConf
 
 import wandb
 
-from src.data import MarketDataLoader
-from src.models.registry import discover_components
-from src.research.backtest import ChallengerVsChampion
-from src.research.experiment_mgr import run_experiment
-from src.tracking.hub_manager import HubManager
+from osa.data import MarketDataLoader
+from osa.models.registry import discover_components
+from osa.research.backtest import ChallengerVsChampion
+from osa.research.experiment_mgr import run_experiment
+from osa.tracking.hub_manager import HubManager
 
 
 def _train_flow(cfg: DictConfig) -> None:

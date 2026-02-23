@@ -8,9 +8,9 @@ import torch.optim as optim
 import wandb
 from omegaconf import OmegaConf
 
-from src.models.factory import create_model
-from src.models.registry import registry
-from src.research.trainer import evaluate_and_log, train_step
+from osa.models.factory import create_model
+from osa.models.registry import registry
+from osa.research.trainer import evaluate_and_log, train_step
 
 
 def load_config(path: str):
