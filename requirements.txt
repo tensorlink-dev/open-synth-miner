@@ -19,3 +19,6 @@ huggingface_hub>=0.22.0
 
 # Utilities
 PyYAML>=6.0.0
+
+# Editable install — exposes `osa` and `open_synth_miner` packages
+-e .

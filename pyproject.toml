@@ -56,13 +56,6 @@ packages = [
 
 [tool.setuptools.package-dir]
 osa = "src"
-"osa.data" = "src/data"
-"osa.models" = "src/models"
-"osa.models.components" = "src/models/components"
-"osa.models.components.attention" = "src/models/components/attention"
-"osa.models.components.patches" = "src/models/components/patches"
-"osa.research" = "src/research"
-"osa.tracking" = "src/tracking"
 
 [tool.setuptools.package-data]
 "*" = [
@@ -73,6 +66,7 @@ osa = "src"
 ]
 
 [project.scripts]
+osa = "main:main"
 open-synth-miner = "main:main"
 
 [tool.pytest.ini_options]
