@@ -17,6 +17,7 @@ from osa.models.factory import (
 )
 from osa.models.registry import discover_components, registry
 from osa.data import MarketDataLoader
+from osa.research.agent_api import ResearchSession, quick_experiment
 from osa.research.experiment_mgr import run_experiment
 
 __all__ = [
@@ -30,5 +31,7 @@ __all__ = [
     "discover_components",
     "registry",
     "MarketDataLoader",
+    "ResearchSession",
+    "quick_experiment",
     "run_experiment",
 ]
