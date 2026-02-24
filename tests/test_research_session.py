@@ -341,9 +341,11 @@ class TestExecution:
         )
         assert result["status"] == "ok"
 
-    def test_run_preset_unknown_raises(self, session):
-        with pytest.raises(KeyError, match="Unknown preset"):
-            session.run_preset("nonexistent_preset")
+    def test_run_preset_unknown_returns_error(self, session):
+        """Unknown preset returns error dict instead of raising."""
+        result = session.run_preset("nonexistent_preset")
+        assert result["status"] == "error"
+        assert "Unknown preset" in result["error"]
 
     def test_sweep_all_presets(self, session):
         """Sweep with a subset of presets to keep the test fast."""
@@ -482,3 +484,96 @@ class TestHeadVariants:
         )
         result = session.run(exp, epochs=1, name=f"test-{head}")
         assert result["status"] == "ok", f"Head {head} run failed: {result}"
+
+
+# ── Audit regression tests ───────────────────────────────────────────────
+
+
+class TestAuditFixes:
+    """Regression tests for bugs identified during code audit."""
+
+    def test_list_presets_deep_copy(self, session):
+        """list_presets() must return a deep copy — mutating it must not
+        affect internal _PRESETS."""
+        from osa.research.agent_api import _PRESETS
+
+        original_blocks = [list(p["blocks"]) for p in _PRESETS]
+        presets = session.list_presets()
+        presets[0]["blocks"].append("INJECTED")
+        presets[0]["tags"].append("INJECTED")
+        # Internal state must be unchanged
+        for i, p in enumerate(_PRESETS):
+            assert p["blocks"] == original_blocks[i]
+            assert "INJECTED" not in p.get("tags", [])
+
+    def test_sweep_excludes_prior_runs(self, session, basic_experiment):
+        """sweep() must only rank runs from the sweep itself, not
+        previously accumulated experiments."""
+        session.run(basic_experiment, epochs=1, name="prior-run")
+        assert session.summary()["num_experiments"] == 1
+
+        result = session.sweep(
+            preset_names=["baseline_gbm", "sde_transformer"], epochs=1,
+        )
+        ranking_names = [r["name"] for r in result["ranking"]]
+        assert "prior-run" not in ranking_names
+        assert len(ranking_names) == 2
+
+        # But compare() still sees everything
+        all_ranking = session.compare()
+        assert len(all_ranking["ranking"]) == 3
+
+    def test_config_no_hydra_blocks_key(self, session, basic_experiment):
+        """create_experiment() config must not leak internal _hydra_blocks."""
+        assert "_hydra_blocks" not in basic_experiment["model"]["backbone"]
+
+    def test_config_omits_block_kwargs_when_none(self, session):
+        """block_kwargs should be absent from config when not provided."""
+        exp = session.create_experiment(
+            blocks=["TransformerBlock"],
+            head="gbm",
+            d_model=16,
+            feature_dim=4,
+            seq_len=16,
+            horizon=6,
+            n_paths=10,
+            batch_size=2,
+            lr=0.001,
+        )
+        assert "block_kwargs" not in exp["model"]["backbone"]
+
+    def test_config_includes_block_kwargs_when_provided(self, session):
+        """block_kwargs should be present when explicitly provided."""
+        exp = session.create_experiment(
+            blocks=["TransformerBlock"],
+            head="gbm",
+            d_model=16,
+            feature_dim=4,
+            seq_len=16,
+            horizon=6,
+            n_paths=10,
+            batch_size=2,
+            lr=0.001,
+            block_kwargs=[{"nhead": 2}],
+        )
+        assert exp["model"]["backbone"]["block_kwargs"] == [{"nhead": 2}]
+
+    def test_run_preset_never_raises(self, session):
+        """run_preset() must return error dict, never raise."""
+        result = session.run_preset("nonexistent_preset")
+        assert result["status"] == "error"
+        assert "traceback" in result
+        # Should still be accumulated
+        assert session.summary()["num_experiments"] == 1
+
+    def test_run_with_real_data_loader(self, session, basic_experiment):
+        """run() works with a real iterable data_loader."""
+        batch = {
+            "history": torch.randn(2, 16, 4),
+            "initial_price": torch.ones(2),
+            "target_factors": torch.exp(torch.randn(2, 6) * 0.01),
+        }
+        loader = [batch, batch]  # two batches
+        result = session.run(basic_experiment, epochs=1, data_loader=loader)
+        assert result["status"] == "ok"
+        assert "crps" in result["metrics"]

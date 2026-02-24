@@ -15,15 +15,16 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.optim as optim
 
+import copy
+
 from osa.models.factory import (
     HEAD_REGISTRY,
     HybridBackbone,
     SynthModel,
-    build_model,
     _smoke_test_model,
 )
 from osa.models.registry import discover_components, registry
-from osa.research.trainer import DataToModelAdapter, Trainer, prepare_paths_for_crps
+from osa.research.trainer import DataToModelAdapter, prepare_paths_for_crps
 from osa.research.metrics import crps_ensemble, log_likelihood
 
 
@@ -180,14 +181,6 @@ def _ensure_components_discovered() -> None:
     discover_components("src/models/components")
 
 
-def _resolve_head_target(head_key: str) -> str:
-    """Return the class name for a head registry key."""
-    cls = HEAD_REGISTRY.get(head_key)
-    if cls is None:
-        raise KeyError(f"Unknown head '{head_key}'. Available: {list(HEAD_REGISTRY.keys())}")
-    return cls.__name__
-
-
 def _count_params(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters())
 
@@ -287,7 +280,7 @@ class ResearchSession:
             Each dict has keys ``name``, ``head``, ``blocks``, ``tags``,
             ``description``.
         """
-        return [dict(p) for p in _PRESETS]
+        return copy.deepcopy(_PRESETS)
 
     # ── Experiment construction ───────────────────────────────────────────
 
@@ -389,27 +382,18 @@ class ResearchSession:
         if head_kwargs:
             head_cfg.update(head_kwargs)
 
-        # Build backbone block list for Hydra
-        hydra_blocks: List[Dict[str, Any]] = []
-        for i, block_name in enumerate(blocks):
-            block_entry: Dict[str, Any] = {
-                "_target_": f"osa.models.registry.registry.{block_name}",
-                "d_model": d_model,
-            }
-            if block_kwargs and block_kwargs[i]:
-                block_entry.update(block_kwargs[i])
-            hydra_blocks.append(block_entry)
+        backbone_cfg: Dict[str, Any] = {
+            "blocks": list(blocks),
+            "d_model": d_model,
+            "feature_dim": feature_dim,
+            "seq_len": seq_len,
+        }
+        if block_kwargs:
+            backbone_cfg["block_kwargs"] = block_kwargs
 
         return {
             "model": {
-                "backbone": {
-                    "blocks": list(blocks),
-                    "d_model": d_model,
-                    "feature_dim": feature_dim,
-                    "seq_len": seq_len,
-                    "block_kwargs": block_kwargs if block_kwargs else [],
-                    "_hydra_blocks": hydra_blocks,
-                },
+                "backbone": backbone_cfg,
                 "head": head_cfg,
             },
             "training": {
@@ -663,6 +647,8 @@ class ResearchSession:
 
         optimizer = optim.Adam(model.parameters(), lr=lr)
         param_count = _count_params(model)
+        device = next(model.parameters()).device
+        adapter = DataToModelAdapter(device=device)
 
         t_start = time.time()
         last_metrics: Dict[str, float] = {}
@@ -671,7 +657,7 @@ class ResearchSession:
             if data_loader is not None:
                 # Use provided data loader
                 for batch in data_loader:
-                    adapted = self._adapt_batch(batch, model)
+                    adapted = self._adapt_batch(batch, adapter)
                     last_metrics = self._train_step(
                         model, optimizer, adapted, horizon, n_paths,
                     )
@@ -699,14 +685,14 @@ class ResearchSession:
         })
         return result
 
+    @staticmethod
     def _adapt_batch(
-        self, batch: Dict[str, torch.Tensor], model: SynthModel
+        batch: Dict[str, torch.Tensor], adapter: DataToModelAdapter
     ) -> Dict[str, torch.Tensor]:
         """Adapt a DataLoader batch if it uses the (B, F, T) format."""
         if "history" in batch and "initial_price" in batch and "target_factors" in batch:
             return batch
         # Assume MarketDataLoader format: {"inputs": (B, F, T), "target": ...}
-        adapter = DataToModelAdapter(device=next(model.parameters()).device)
         return adapter(batch)
 
     @staticmethod
@@ -723,7 +709,7 @@ class ResearchSession:
 
         history = batch["history"]
         initial_price = batch["initial_price"]
-        target = batch["target_factors"]
+        target = batch["target_factors"].detach()
 
         paths, mu, sigma = model(
             history, initial_price=initial_price, horizon=horizon, n_paths=n_paths,
@@ -750,6 +736,9 @@ class ResearchSession:
     ) -> Dict[str, Any]:
         """Run a named preset with optional overrides.
 
+        Like :meth:`run`, this method never raises on execution failures —
+        errors are returned in the result dict.
+
         Parameters
         ----------
         preset_name : str
@@ -765,33 +754,46 @@ class ResearchSession:
         dict
             Same format as :meth:`run`.
         """
-        preset = None
-        for p in _PRESETS:
-            if p["name"] == preset_name:
-                preset = p
-                break
-        if preset is None:
-            available = [p["name"] for p in _PRESETS]
-            raise KeyError(f"Unknown preset '{preset_name}'. Available: {available}")
+        try:
+            preset = None
+            for p in _PRESETS:
+                if p["name"] == preset_name:
+                    preset = p
+                    break
+            if preset is None:
+                available = [p["name"] for p in _PRESETS]
+                raise KeyError(f"Unknown preset '{preset_name}'. Available: {available}")
 
-        defaults: Dict[str, Any] = {
-            "d_model": 32,
-            "feature_dim": 4,
-            "seq_len": 32,
-            "horizon": 12,
-            "n_paths": 100,
-            "batch_size": 4,
-            "lr": 0.001,
-        }
-        if overrides:
-            defaults.update(overrides)
+            defaults: Dict[str, Any] = {
+                "d_model": 32,
+                "feature_dim": 4,
+                "seq_len": 32,
+                "horizon": 12,
+                "n_paths": 100,
+                "batch_size": 4,
+                "lr": 0.001,
+            }
+            if overrides:
+                defaults.update(overrides)
 
-        exp = self.create_experiment(
-            blocks=preset["blocks"],
-            head=preset["head"],
-            **defaults,
-        )
-        return self.run(exp, epochs=epochs, name=preset_name)
+            exp = self.create_experiment(
+                blocks=preset["blocks"],
+                head=preset["head"],
+                **defaults,
+            )
+            return self.run(exp, epochs=epochs, name=preset_name)
+        except Exception as e:
+            result: Dict[str, Any] = {
+                "status": "error",
+                "error": f"{type(e).__name__}: {e}",
+                "traceback": traceback.format_exc(),
+            }
+            self._results.append({
+                "name": preset_name,
+                "config": {},
+                "result": result,
+            })
+            return result
 
     def sweep(
         self,
@@ -813,16 +815,29 @@ class ResearchSession:
             Same format as :meth:`compare`, computed over just the sweep runs.
         """
         names = preset_names or [p["name"] for p in _PRESETS]
-        sweep_results: List[Dict[str, Any]] = []
+        start_idx = len(self._results)
 
         for name in names:
-            result = self.run_preset(name, epochs=epochs)
-            sweep_results.append({
-                "name": name,
-                "result": result,
-            })
+            self.run_preset(name, epochs=epochs)
 
-        return self.compare()
+        # Build ranking from only this sweep's runs
+        ranking: List[Dict[str, Any]] = []
+        for entry in self._results[start_idx:]:
+            result = entry["result"]
+            crps_val = float("inf")
+            param_count = 0
+            if result.get("status") == "ok":
+                crps_val = result.get("metrics", {}).get("crps", float("inf"))
+                param_count = result.get("param_count", 0)
+            ranking.append({
+                "name": entry["name"],
+                "crps": crps_val,
+                "param_count": param_count,
+                "experiment": entry["config"],
+                "status": result.get("status", "unknown"),
+            })
+        ranking.sort(key=lambda r: r["crps"])
+        return {"ranking": ranking}
 
     # ── Session state ─────────────────────────────────────────────────────
 
