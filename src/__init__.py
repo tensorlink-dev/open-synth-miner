@@ -1,9 +1,9 @@
-"""Public package surface for Open Synth Miner.
+"""Public package surface for Open Synth Miner (OSA — Open Synth Architecture).
 
 This module aggregates the most commonly used factory helpers,
 registry utilities, and lightweight data loaders so downstream
-projects can simply import ``open_synth_miner`` without drilling
-into submodules.
+projects can simply import ``open_synth_miner`` or ``osa`` without
+drilling into submodules.
 """
 
 from osa.models.factory import (

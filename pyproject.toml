@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "open-synth-miner"
 version = "0.1.0"
-description = "Hydra-driven research framework for Synth hybrid mining"
+description = "OSA (Open Synth Architecture) — Hydra-driven research framework for Synth hybrid mining"
 readme = "README.md"
 authors = [{ name = "Open Synth Miner Contributors" }]
 license = { file = "LICENSE" }
