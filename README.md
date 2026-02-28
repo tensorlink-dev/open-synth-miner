@@ -2,6 +2,8 @@
 
 ![Coverage](coverage.svg)
 
+> **`osa`** — **O**pen **S**ynth **A**rchitecture — is the short import name for this package (`from osa.models import …`).
+
 Open Synth Miner is a Hydra-driven research framework for Bittensor SN50 (Synth) that focuses on hybrid neural architectures, stochastic path simulation, and "build in public" tracking. Models are assembled from registry-driven blocks, trained to generate 1,000 differentiable price paths, and logged to Weights & Biases while automatically publishing artifacts to the Hugging Face Hub.
 
 ## Architecture Overview

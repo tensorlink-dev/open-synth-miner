@@ -1,5 +1,7 @@
 # Open Synth Miner — Agent Instructions
 
+> **`osa`** stands for **O**pen **S**ynth **A**rchitecture — the short import name and CLI entry point for this package.
+
 This is a Hydra-driven research framework for **Bittensor SN50 (Synth)** focused on hybrid neural architectures for time-series forecasting and stochastic price path simulation.
 
 ## Quick Reference
